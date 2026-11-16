@@ -1530,6 +1530,13 @@ private:
         const bool displayRefresh = hasExtension(XR_FB_DISPLAY_REFRESH_RATE_EXTENSION_NAME);
         if (displayRefresh) enabledExtensions.push_back(XR_FB_DISPLAY_REFRESH_RATE_EXTENSION_NAME);
 
+        // Steam Frame: without this the runtime remaps the Touch bindings onto
+        // the Frame Controller; with it the native profile can be suggested.
+        frameControllerExtensionEnabled_ = hasExtension(kFrameControllerExtensionName);
+        if (frameControllerExtensionEnabled_) {
+            enabledExtensions.push_back(kFrameControllerExtensionName);
+        }
+
         XrInstanceCreateInfoAndroidKHR androidInfo{
             XR_TYPE_INSTANCE_CREATE_INFO_ANDROID_KHR};
         androidInfo.applicationVM = androidApp_->activity->vm;
@@ -1780,6 +1787,27 @@ private:
                 xrSuggestInteractionProfileBindings(instance_, &suggestedBindings),
                 "xrSuggestInteractionProfileBindings")) {
             return false;
+        }
+
+        // The Frame Controller exposes the same thumbstick, aim, trigger and
+        // squeeze paths, so the Touch binding table applies unchanged. A
+        // rejected suggestion is not fatal: the Touch bindings remain.
+        if (frameControllerExtensionEnabled_) {
+            XrPath frameControllerProfile = XR_NULL_PATH;
+            suggestedBindings.interactionProfile = XR_NULL_PATH;
+            if (CheckXr(
+                    xrStringToPath(
+                        instance_,
+                        "/interaction_profiles/valve/frame_controller_valve",
+                        &frameControllerProfile),
+                    "xrStringToPath(Frame controller profile)")) {
+                suggestedBindings.interactionProfile = frameControllerProfile;
+                if (CheckXr(
+                        xrSuggestInteractionProfileBindings(instance_, &suggestedBindings),
+                        "xrSuggestInteractionProfileBindings(Frame controller)")) {
+                    LOGI("OpenXR Steam Frame Controller profile bindings suggested");
+                }
+            }
         }
 
         XrSessionActionSetsAttachInfo attachInfo{
@@ -2437,6 +2465,9 @@ private:
     XrSpace appSpace_ = XR_NULL_HANDLE;
     XrSpace viewSpace_ = XR_NULL_HANDLE;
     XrActionSet controllerActionSet_ = XR_NULL_HANDLE;
+    static constexpr const char* kFrameControllerExtensionName =
+        "XR_VALVE_frame_controller_interaction";
+    bool frameControllerExtensionEnabled_ = false;
     XrAction thumbstickAction_ = XR_NULL_HANDLE;
     XrAction aimAction_ = XR_NULL_HANDLE;
     XrAction triggerAction_ = XR_NULL_HANDLE;

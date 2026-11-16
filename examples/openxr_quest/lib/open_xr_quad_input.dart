@@ -25,6 +25,12 @@ class _OpenXrQuadInputState extends State<OpenXrQuadInput> {
   final _positions = ValueNotifier<List<Offset?>>([null, null]);
   final _lastPixels = [Offset.zero, Offset.zero];
   final _pressed = [false, false];
+  // A trigger pull swings the ray farther than Flutter's 18 px tap slop, so a
+  // press holds its down position until the ray leaves this radius. Past it
+  // the pointer follows the ray again, which keeps sliders and drags working.
+  static const _pressDeadzonePixels = 40.0;
+  final _downPixels = [Offset.zero, Offset.zero];
+  final _dragging = [false, false];
   final _triggerHeld = [false, false];
   final _added = [false, false];
   final _pointers = [0, 0];
@@ -78,9 +84,16 @@ class _OpenXrQuadInputState extends State<OpenXrQuadInput> {
       // The preserved native UI copy mirrors horizontally. Flutter paints the
       // entire UI flipped; inject its physical surface coordinate, so Flutter's
       // transform hit testing reaches the same logical pixel as the reticle.
-      final pixel = hit == null
+      var pixel = hit == null
           ? const Offset(-1, -1)
           : Offset(widget.configuration.textureWidthPixels - hit.dx, hit.dy);
+      if (_pressed[hand] && hit != null && !_dragging[hand]) {
+        if ((pixel - _downPixels[hand]).distance > _pressDeadzonePixels) {
+          _dragging[hand] = true;
+        } else {
+          pixel = _downPixels[hand];
+        }
+      }
       void emit(PointerEvent event) =>
           GestureBinding.instance.handlePointerEvent(event);
       if (!_added[hand]) {
@@ -140,6 +153,8 @@ class _OpenXrQuadInputState extends State<OpenXrQuadInput> {
           _pointers[hand] = _nextPointer++;
           _pressed[hand] = true;
           _capturedPanels[hand] = panel;
+          _downPixels[hand] = pixel;
+          _dragging[hand] = false;
           emit(
             PointerDownEvent(
               pointer: _pointers[hand],
