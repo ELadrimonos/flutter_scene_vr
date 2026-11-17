@@ -8,9 +8,11 @@
 #include <openxr/openxr.h>
 #include <openxr/openxr_platform.h>
 
-#include "openxr_runtime_metrics.h"
-#include "openxr_panel_controls.h"
+#include "openxr_controller_input.h"
 #include "openxr_fps_hud.h"
+#include "openxr_log.h"
+#include "openxr_panel_controls.h"
+#include "openxr_runtime_metrics.h"
 
 #include <algorithm>
 #include <array>
@@ -22,12 +24,12 @@
 #include <cstring>
 #include <mutex>
 #include <optional>
-#include <vector>
+#include <type_traits>
 #include <utility>
+#include <vector>
 
 namespace {
 
-constexpr char kLogTag[] = "FlutterSceneOpenXR";
 std::atomic<uint64_t> gPerformanceGeneration{0};
 std::atomic<uint64_t> gPanelLayoutGeneration{0};
 std::atomic_bool gQuarantinedGpuSession{false};
@@ -40,30 +42,10 @@ std::mutex gResolutionMutex;
 uint64_t gResolutionRequestId = 0;
 std::optional<std::pair<uint64_t, double>> gResolutionRequest;
 
-constexpr float kThumbstickDeadzone = 0.22f;
-
-#define LOGI(...) __android_log_print(ANDROID_LOG_INFO, kLogTag, __VA_ARGS__)
-#define LOGW(...) __android_log_print(ANDROID_LOG_WARN, kLogTag, __VA_ARGS__)
-#define LOGE(...) __android_log_print(ANDROID_LOG_ERROR, kLogTag, __VA_ARGS__)
-
-bool CheckXr(XrResult result, const char* operation) {
-    if (XR_SUCCEEDED(result)) return true;
-    LOGE("%s failed with OpenXR result %d", operation, result);
-    return false;
-}
-
 bool CheckEgl(bool result, const char* operation) {
     if (result) return true;
     LOGE("%s failed with EGL error 0x%x", operation, eglGetError());
     return false;
-}
-
-float ApplyThumbstickDeadzone(float value) {
-    const float magnitude = std::abs(value);
-    if (magnitude <= kThumbstickDeadzone) return 0;
-    const float adjustedMagnitude =
-        (magnitude - kThumbstickDeadzone) / (1.0f - kThumbstickDeadzone);
-    return std::copysign(adjustedMagnitude, value);
 }
 
 struct Swapchain {
@@ -489,14 +471,30 @@ public:
         const std::array<bool, 2>& primaryButtons) {
         if (views.size() != 2) return;
 
-        // With panels: 45 legacy, 11 panel input, 20 panel poses. Four values
-        // always close the packet: the two scene grips, then the two primary
-        // (A/X) buttons.
-        std::vector<double> values((panelInput ? 76 : 45) + 4);
+        // The layout OpenXrFrame.fromPlatform parses, with matching names.
+        constexpr size_t kEyesOffset = 1;
+        constexpr size_t kEyeStride = 11;
+        constexpr size_t kThumbsticksOffset = 23;
+        constexpr size_t kAimsOffset = 27;
+        constexpr size_t kControllersValueCount = 45;
+        constexpr size_t kPanelBlockOffset = kControllersValueCount;
+        constexpr size_t kPanelPosesOffset = 56;
+        constexpr size_t kPanelPosesValueCount = 76;
+        constexpr size_t kInputTailLength = 4;
+        static_assert(kAimsOffset + std::tuple_size_v<std::decay_t<decltype(aims)>> == kControllersValueCount);
+        static_assert(kPanelBlockOffset +
+                          std::tuple_size_v<std::decay_t<decltype(panelInput)>::value_type> ==
+                      kPanelPosesOffset);
+        static_assert(kPanelPosesOffset + std::tuple_size_v<std::decay_t<decltype(panelPoses)>> ==
+                      kPanelPosesValueCount);
+
+        // The input tail (scene grips, then primary buttons) always closes it.
+        std::vector<double> values(
+            (panelInput ? kPanelPosesValueCount : kControllersValueCount) + kInputTailLength);
         values[0] = static_cast<double>(sequence);
         for (size_t eyeIndex = 0; eyeIndex < views.size(); ++eyeIndex) {
             const XrView& view = views[eyeIndex];
-            const size_t offset = 1 + eyeIndex * 11;
+            const size_t offset = kEyesOffset + eyeIndex * kEyeStride;
             values[offset] = view.pose.position.x;
             values[offset + 1] = view.pose.position.y;
             values[offset + 2] = view.pose.position.z;
@@ -509,16 +507,16 @@ public:
             values[offset + 9] = view.fov.angleUp;
             values[offset + 10] = view.fov.angleDown;
         }
-        values[23] = thumbsticks[0].x;
-        values[24] = thumbsticks[0].y;
-        values[25] = thumbsticks[1].x;
-        values[26] = thumbsticks[1].y;
-        std::copy(aims.begin(), aims.end(), values.begin() + 27);
+        values[kThumbsticksOffset] = thumbsticks[0].x;
+        values[kThumbsticksOffset + 1] = thumbsticks[0].y;
+        values[kThumbsticksOffset + 2] = thumbsticks[1].x;
+        values[kThumbsticksOffset + 3] = thumbsticks[1].y;
+        std::copy(aims.begin(), aims.end(), values.begin() + kAimsOffset);
         if (panelInput) {
-            std::copy(panelInput->begin(), panelInput->end(), values.begin() + 45);
-            std::copy(panelPoses.begin(), panelPoses.end(), values.begin() + 56);
+            std::copy(panelInput->begin(), panelInput->end(), values.begin() + kPanelBlockOffset);
+            std::copy(panelPoses.begin(), panelPoses.end(), values.begin() + kPanelPosesOffset);
         }
-        const size_t tail = values.size() - 4;
+        const size_t tail = values.size() - kInputTailLength;
         values[tail] = sceneGrips[0];
         values[tail + 1] = sceneGrips[1];
         values[tail + 2] = primaryButtons[0] ? 1 : 0;
@@ -1269,7 +1267,7 @@ public:
             LOGI("+++ OpenXR runtime GPU/CPU metrics %s",
                  runtimeMetrics_.Enable(instance_, session_) ? "enabled" : "unavailable");
         }
-        if (!CreateControllerInput()) return false;
+        if (!controllerInput_.Create(instance_, session_)) return false;
         if (!CreateReferenceSpace()) return false;
         if (!CreateSwapchains()) return false;
 
@@ -1344,23 +1342,13 @@ public:
         fpsHudSwapchain_ = {};
         if (viewSpace_ != XR_NULL_HANDLE) xrDestroySpace(viewSpace_);
         if (appSpace_ != XR_NULL_HANDLE) xrDestroySpace(appSpace_);
-        for (XrSpace space : aimSpaces_) if (space != XR_NULL_HANDLE) xrDestroySpace(space);
-        aimSpaces_ = {XR_NULL_HANDLE, XR_NULL_HANDLE};
-        if (aimAction_ != XR_NULL_HANDLE) xrDestroyAction(aimAction_);
-        if (triggerAction_ != XR_NULL_HANDLE) xrDestroyAction(triggerAction_);
-        if (gripAction_ != XR_NULL_HANDLE) xrDestroyAction(gripAction_);
-        if (primaryButtonAction_ != XR_NULL_HANDLE) xrDestroyAction(primaryButtonAction_);
-        aimAction_ = triggerAction_ = gripAction_ = primaryButtonAction_ = XR_NULL_HANDLE;
-        if (thumbstickAction_ != XR_NULL_HANDLE) xrDestroyAction(thumbstickAction_);
-        if (controllerActionSet_ != XR_NULL_HANDLE) xrDestroyActionSet(controllerActionSet_);
+        controllerInput_.Destroy();
         if (session_ != XR_NULL_HANDLE) xrDestroySession(session_);
         renderer_.Shutdown();
         if (instance_ != XR_NULL_HANDLE) xrDestroyInstance(instance_);
 
         appSpace_ = XR_NULL_HANDLE;
         viewSpace_ = XR_NULL_HANDLE;
-        thumbstickAction_ = XR_NULL_HANDLE;
-        controllerActionSet_ = XR_NULL_HANDLE;
         session_ = XR_NULL_HANDLE;
         instance_ = XR_NULL_HANDLE;
     }
@@ -1732,12 +1720,7 @@ private:
         const bool displayRefresh = hasExtension(XR_FB_DISPLAY_REFRESH_RATE_EXTENSION_NAME);
         if (displayRefresh) enabledExtensions.push_back(XR_FB_DISPLAY_REFRESH_RATE_EXTENSION_NAME);
 
-        // Steam Frame: without this the runtime remaps the Touch bindings onto
-        // the Frame Controller; with it the native profile can be suggested.
-        frameControllerExtensionEnabled_ = hasExtension(kFrameControllerExtensionName);
-        if (frameControllerExtensionEnabled_) {
-            enabledExtensions.push_back(kFrameControllerExtensionName);
-        }
+        controllerInput_.RequestExtensions(hasExtension, enabledExtensions);
 
         XrInstanceCreateInfoAndroidKHR androidInfo{
             XR_TYPE_INSTANCE_CREATE_INFO_ANDROID_KHR};
@@ -1894,268 +1877,6 @@ private:
         createInfo.next = &graphicsBinding;
         createInfo.systemId = systemId_;
         return CheckXr(xrCreateSession(instance_, &createInfo, &session_), "xrCreateSession");
-    }
-
-    bool CreateControllerInput() {
-        XrActionSetCreateInfo actionSetInfo{XR_TYPE_ACTION_SET_CREATE_INFO};
-        std::strncpy(
-            actionSetInfo.actionSetName,
-            "flutter_scene",
-            XR_MAX_ACTION_SET_NAME_SIZE - 1);
-        std::strncpy(
-            actionSetInfo.localizedActionSetName,
-            "Flutter Scene",
-            XR_MAX_LOCALIZED_ACTION_SET_NAME_SIZE - 1);
-        if (!CheckXr(
-                xrCreateActionSet(instance_, &actionSetInfo, &controllerActionSet_),
-                "xrCreateActionSet")) {
-            return false;
-        }
-
-        if (!CheckXr(
-                xrStringToPath(instance_, "/user/hand/left", &handPaths_[0]),
-                "xrStringToPath(left hand)") ||
-            !CheckXr(
-                xrStringToPath(instance_, "/user/hand/right", &handPaths_[1]),
-                "xrStringToPath(right hand)")) {
-            return false;
-        }
-
-        XrActionCreateInfo thumbstickInfo{XR_TYPE_ACTION_CREATE_INFO};
-        thumbstickInfo.actionType = XR_ACTION_TYPE_VECTOR2F_INPUT;
-        std::strncpy(
-            thumbstickInfo.actionName,
-            "thumbsticks",
-            XR_MAX_ACTION_NAME_SIZE - 1);
-        std::strncpy(
-            thumbstickInfo.localizedActionName,
-            "Thumbsticks",
-            XR_MAX_LOCALIZED_ACTION_NAME_SIZE - 1);
-        thumbstickInfo.countSubactionPaths = handPaths_.size();
-        thumbstickInfo.subactionPaths = handPaths_.data();
-        if (!CheckXr(
-                xrCreateAction(controllerActionSet_, &thumbstickInfo, &thumbstickAction_),
-                "xrCreateAction(thumbsticks)")) {
-            return false;
-        }
-
-        std::array<XrPath, 2> thumbstickPaths{};
-        XrPath touchControllerProfile = XR_NULL_PATH;
-        if (!CheckXr(
-                xrStringToPath(
-                    instance_,
-                    "/user/hand/left/input/thumbstick",
-                    &thumbstickPaths[0]),
-                "xrStringToPath(left thumbstick)") ||
-            !CheckXr(
-                xrStringToPath(
-                    instance_,
-                    "/user/hand/right/input/thumbstick",
-                    &thumbstickPaths[1]),
-                "xrStringToPath(right thumbstick)") ||
-            !CheckXr(
-                xrStringToPath(
-                    instance_,
-                    "/interaction_profiles/oculus/touch_controller",
-                    &touchControllerProfile),
-                "xrStringToPath(Touch controller profile)")) {
-            return false;
-        }
-
-        XrActionCreateInfo aimInfo{XR_TYPE_ACTION_CREATE_INFO};
-        aimInfo.actionType = XR_ACTION_TYPE_POSE_INPUT;
-        std::strncpy(aimInfo.actionName, "ui_aim", XR_MAX_ACTION_NAME_SIZE - 1);
-        std::strncpy(aimInfo.localizedActionName, "UI aim", XR_MAX_LOCALIZED_ACTION_NAME_SIZE - 1);
-        aimInfo.countSubactionPaths = handPaths_.size();
-        aimInfo.subactionPaths = handPaths_.data();
-        if (!CheckXr(xrCreateAction(controllerActionSet_, &aimInfo, &aimAction_), "xrCreateAction(aim)")) return false;
-        XrActionCreateInfo triggerInfo = aimInfo;
-        triggerInfo.actionType = XR_ACTION_TYPE_FLOAT_INPUT;
-        std::strncpy(triggerInfo.actionName, "ui_trigger", XR_MAX_ACTION_NAME_SIZE - 1);
-        std::strncpy(triggerInfo.localizedActionName, "UI trigger", XR_MAX_LOCALIZED_ACTION_NAME_SIZE - 1);
-        if (!CheckXr(xrCreateAction(controllerActionSet_, &triggerInfo, &triggerAction_), "xrCreateAction(trigger)")) return false;
-        XrActionCreateInfo gripInfo = triggerInfo;
-        std::strncpy(gripInfo.actionName, "panel_grip", XR_MAX_ACTION_NAME_SIZE - 1);
-        std::strncpy(gripInfo.localizedActionName, "Move floating panel", XR_MAX_LOCALIZED_ACTION_NAME_SIZE - 1);
-        if (!CheckXr(xrCreateAction(controllerActionSet_, &gripInfo, &gripAction_), "xrCreateAction(grip)")) return false;
-        XrActionCreateInfo primaryInfo = aimInfo;
-        primaryInfo.actionType = XR_ACTION_TYPE_BOOLEAN_INPUT;
-        std::strncpy(primaryInfo.actionName, "primary_button", XR_MAX_ACTION_NAME_SIZE - 1);
-        std::strncpy(primaryInfo.localizedActionName, "Primary button", XR_MAX_LOCALIZED_ACTION_NAME_SIZE - 1);
-        if (!CheckXr(xrCreateAction(controllerActionSet_, &primaryInfo, &primaryButtonAction_), "xrCreateAction(primary)")) return false;
-        std::array<XrPath, 2> aimPaths{}, triggerPaths{}, gripPaths{}, primaryPaths{};
-        // The lower face button of each hand: X on the left, A on the right.
-        if (!CheckXr(xrStringToPath(instance_, "/user/hand/left/input/x/click", &primaryPaths[0]), "primary path") ||
-            !CheckXr(xrStringToPath(instance_, "/user/hand/right/input/a/click", &primaryPaths[1]), "primary path")) return false;
-        for (size_t hand = 0; hand < 2; ++hand) {
-            const char* aimPath = hand == 0 ? "/user/hand/left/input/aim/pose" : "/user/hand/right/input/aim/pose";
-            const char* triggerPath = hand == 0 ? "/user/hand/left/input/trigger/value" : "/user/hand/right/input/trigger/value";
-            if (!CheckXr(xrStringToPath(instance_, aimPath, &aimPaths[hand]), "aim path") ||
-                !CheckXr(xrStringToPath(instance_, triggerPath, &triggerPaths[hand]), "trigger path")) return false;
-            const char* gripPath = hand == 0 ? "/user/hand/left/input/squeeze/value" : "/user/hand/right/input/squeeze/value";
-            if (!CheckXr(xrStringToPath(instance_, gripPath, &gripPaths[hand]), "grip path")) return false;
-            XrActionSpaceCreateInfo spaceInfo{XR_TYPE_ACTION_SPACE_CREATE_INFO};
-            spaceInfo.action = aimAction_;
-            spaceInfo.subactionPath = handPaths_[hand];
-            spaceInfo.poseInActionSpace.orientation.w = 1;
-            if (!CheckXr(xrCreateActionSpace(session_, &spaceInfo, &aimSpaces_[hand]), "xrCreateActionSpace(aim)")) return false;
-        }
-        // The face buttons come last so a profile that rejects them can be
-        // retried without them.
-        constexpr uint32_t kBindingsWithoutFaceButtons = 8;
-        constexpr size_t kLeftPrimaryBinding = 8;
-        const std::array<XrActionSuggestedBinding, 10> bindings{{
-            {thumbstickAction_, thumbstickPaths[0]}, {thumbstickAction_, thumbstickPaths[1]},
-            {aimAction_, aimPaths[0]}, {aimAction_, aimPaths[1]},
-            {triggerAction_, triggerPaths[0]}, {triggerAction_, triggerPaths[1]},
-            {gripAction_, gripPaths[0]}, {gripAction_, gripPaths[1]},
-            {primaryButtonAction_, primaryPaths[0]}, {primaryButtonAction_, primaryPaths[1]},
-        }};
-        XrInteractionProfileSuggestedBinding suggestedBindings{
-            XR_TYPE_INTERACTION_PROFILE_SUGGESTED_BINDING};
-        suggestedBindings.interactionProfile = touchControllerProfile;
-        suggestedBindings.countSuggestedBindings = bindings.size();
-        suggestedBindings.suggestedBindings = bindings.data();
-        if (!CheckXr(
-                xrSuggestInteractionProfileBindings(instance_, &suggestedBindings),
-                "xrSuggestInteractionProfileBindings")) {
-            return false;
-        }
-
-        // The Frame Controller exposes the same thumbstick, aim, trigger and
-        // squeeze paths, so the Touch binding table applies unchanged. A
-        // rejected suggestion is not fatal: the Touch bindings remain.
-        if (frameControllerExtensionEnabled_) {
-            XrPath frameControllerProfile = XR_NULL_PATH;
-            suggestedBindings.interactionProfile = XR_NULL_PATH;
-            if (CheckXr(
-                    xrStringToPath(
-                        instance_,
-                        "/interaction_profiles/valve/frame_controller_valve",
-                        &frameControllerProfile),
-                    "xrStringToPath(Frame controller profile)")) {
-                // The Frame puts A/B/X/Y all on the right controller and a d-pad
-                // on the left, like a gamepad. The primary button is the bottom
-                // position on each: A on the right, d-pad down on the left.
-                XrPath framePrimaryLeft = XR_NULL_PATH;
-                auto frameBindings = bindings;
-                if (CheckXr(xrStringToPath(instance_, "/user/hand/left/input/dpad_down/click", &framePrimaryLeft),
-                        "Frame primary path")) {
-                    frameBindings[kLeftPrimaryBinding].binding = framePrimaryLeft;
-                }
-                suggestedBindings.suggestedBindings = frameBindings.data();
-                suggestedBindings.interactionProfile = frameControllerProfile;
-                if (CheckXr(
-                        xrSuggestInteractionProfileBindings(instance_, &suggestedBindings),
-                        "xrSuggestInteractionProfileBindings(Frame controller)")) {
-                    LOGI("OpenXR Steam Frame Controller profile bindings suggested");
-                } else {
-                    suggestedBindings.countSuggestedBindings = kBindingsWithoutFaceButtons;
-                    if (CheckXr(
-                            xrSuggestInteractionProfileBindings(instance_, &suggestedBindings),
-                            "xrSuggestInteractionProfileBindings(Frame controller, no face buttons)")) {
-                        LOGI("OpenXR Steam Frame Controller bindings suggested without face buttons");
-                    }
-                }
-            }
-        }
-
-        XrSessionActionSetsAttachInfo attachInfo{
-            XR_TYPE_SESSION_ACTION_SETS_ATTACH_INFO};
-        attachInfo.countActionSets = 1;
-        attachInfo.actionSets = &controllerActionSet_;
-        return CheckXr(
-            xrAttachSessionActionSets(session_, &attachInfo),
-            "xrAttachSessionActionSets");
-    }
-
-    std::array<XrVector2f, 2> ReadThumbsticks() {
-        std::array<XrVector2f, 2> thumbsticks{};
-        XrActiveActionSet activeActionSet{};
-        activeActionSet.actionSet = controllerActionSet_;
-        XrActionsSyncInfo syncInfo{XR_TYPE_ACTIONS_SYNC_INFO};
-        syncInfo.countActiveActionSets = 1;
-        syncInfo.activeActionSets = &activeActionSet;
-        actionsFocused_ = xrSyncActions(session_, &syncInfo) == XR_SUCCESS &&
-            sessionState_ == XR_SESSION_STATE_FOCUSED;
-        if (!actionsFocused_) return thumbsticks;
-
-        for (size_t hand = 0; hand < handPaths_.size(); ++hand) {
-            XrActionStateGetInfo stateInfo{XR_TYPE_ACTION_STATE_GET_INFO};
-            stateInfo.action = thumbstickAction_;
-            stateInfo.subactionPath = handPaths_[hand];
-            XrActionStateVector2f state{XR_TYPE_ACTION_STATE_VECTOR2F};
-            if (XR_SUCCEEDED(xrGetActionStateVector2f(session_, &stateInfo, &state)) &&
-                state.isActive) {
-                thumbsticks[hand] = {
-                    ApplyThumbstickDeadzone(state.currentState.x),
-                    ApplyThumbstickDeadzone(state.currentState.y),
-                };
-            }
-        }
-        return thumbsticks;
-    }
-
-    // Sample both hands in the same LOCAL space and predicted time as the eyes.
-    // Native panel hit testing and Dart scene rays must agree on this sample;
-    // Dart only intersects the legacy single-quad configuration itself.
-    std::array<double, 18> ReadControllerAims(XrTime displayTime) const {
-        std::array<double, 18> values{};
-        if (!actionsFocused_) return values;
-        for (size_t hand = 0; hand < 2; ++hand) {
-            XrActionStateGetInfo info{XR_TYPE_ACTION_STATE_GET_INFO};
-            info.subactionPath = handPaths_[hand];
-            info.action = aimAction_;
-            XrActionStatePose state{XR_TYPE_ACTION_STATE_POSE};
-            XrSpaceLocation location{XR_TYPE_SPACE_LOCATION};
-            const XrSpaceLocationFlags valid = XR_SPACE_LOCATION_POSITION_VALID_BIT | XR_SPACE_LOCATION_ORIENTATION_VALID_BIT;
-            if (XR_FAILED(xrGetActionStatePose(session_, &info, &state)) || !state.isActive ||
-                XR_FAILED(xrLocateSpace(aimSpaces_[hand], appSpace_, displayTime, &location)) ||
-                (location.locationFlags & valid) != valid) continue;
-            const size_t offset = hand * 9;
-            values[offset] = location.pose.position.x;
-            values[offset + 1] = location.pose.position.y;
-            values[offset + 2] = location.pose.position.z;
-            values[offset + 3] = location.pose.orientation.x;
-            values[offset + 4] = location.pose.orientation.y;
-            values[offset + 5] = location.pose.orientation.z;
-            values[offset + 6] = location.pose.orientation.w;
-            values[offset + 7] = 1;
-            info.action = triggerAction_;
-            XrActionStateFloat trigger{XR_TYPE_ACTION_STATE_FLOAT};
-            if (XR_SUCCEEDED(xrGetActionStateFloat(session_, &info, &trigger)) && trigger.isActive) {
-                values[offset + 8] = trigger.currentState;
-            }
-        }
-        return values;
-    }
-
-    std::array<float,2> ReadGrips() const {
-        std::array<float,2> values{};
-        if (!actionsFocused_) return values;
-        for (int hand=0;hand<2;++hand) {
-            XrActionStateGetInfo info{XR_TYPE_ACTION_STATE_GET_INFO};
-            info.action = gripAction_;
-            info.subactionPath = handPaths_[hand];
-            XrActionStateFloat state{XR_TYPE_ACTION_STATE_FLOAT};
-            if (XR_SUCCEEDED(xrGetActionStateFloat(session_, &info, &state)) && state.isActive)
-                values[hand] = state.currentState;
-        }
-        return values;
-    }
-
-    std::array<bool,2> ReadPrimaryButtons() const {
-        std::array<bool,2> values{};
-        if (!actionsFocused_) return values;
-        for (int hand=0;hand<2;++hand) {
-            XrActionStateGetInfo info{XR_TYPE_ACTION_STATE_GET_INFO};
-            info.action = primaryButtonAction_;
-            info.subactionPath = handPaths_[hand];
-            XrActionStateBoolean state{XR_TYPE_ACTION_STATE_BOOLEAN};
-            if (XR_SUCCEEDED(xrGetActionStateBoolean(session_, &info, &state)) && state.isActive)
-                values[hand] = state.currentState == XR_TRUE;
-        }
-        return values;
     }
 
     bool CreateReferenceSpace() {
@@ -2398,9 +2119,8 @@ private:
         const uint64_t currentViewSequence = ++viewSequence_;
         RememberViewSample(currentViewSequence);
         const auto publishStarted = PerformanceClock::now();
-        const auto thumbsticks = ReadThumbsticks();
-        const auto aims = ReadControllerAims(displayTime);
-        const auto grips = ReadGrips();
+        const openxr_input::ControllerSample input = controllerInput_.Sample(
+            appSpace_, displayTime, sessionState_ == XR_SESSION_STATE_FOCUSED);
         const bool rendererReady = renderer_.DirectStereoReady();
         std::optional<std::array<double,11>> panelInput;
         if (compositionQuadConfiguration_.panelSplitPixels > 0) {
@@ -2415,20 +2135,21 @@ private:
             const bool hovered = panelControls_.hudHovered;
             panelControls_.Update(panelHead_, compositionQuadConfiguration_.pose,
                 compositionQuadConfiguration_.size, compositionQuadConfiguration_.panelSplitPixels,
-                compositionQuadConfiguration_.textureWidth, aims, grips, thumbsticks, dt, rendererReady);
+                compositionQuadConfiguration_.textureWidth, input.aims, input.grips, input.thumbsticks,
+                dt, rendererReady);
             if (paused != panelControls_.uiPaused || hovered != panelControls_.hudHovered) fpsHudDirty_ = true;
             panelInput = panelControls_.Pack(compositionQuadConfiguration_.panelSplitPixels,
                 compositionQuadConfiguration_.textureWidth, compositionQuadConfiguration_.textureHeight);
         }
         // Grips holding a panel read as released so scene content ignores them.
-        std::array<float, 2> sceneGrips = grips;
+        std::array<float, 2> sceneGrips = input.grips;
         if (panelInput) {
             for (int hand = 0; hand < 2; ++hand) {
                 if (panelControls_.PanelGrabbed(hand)) sceneGrips[hand] = 0;
             }
         }
-        renderer_.PublishViews(views_, thumbsticks, aims, currentViewSequence, panelInput,
-            panelControls_.PackPoses(), sceneGrips, ReadPrimaryButtons());
+        renderer_.PublishViews(views_, input.thumbsticks, input.aims, currentViewSequence, panelInput,
+            panelControls_.PackPoses(), sceneGrips, input.primaryButtons);
         const auto publishFinished = PerformanceClock::now();
         // UI OFF bypasses SurfaceTexture latching and every Flutter panel copy.
         // The direct eye surfaces and their GPU ownership remain unchanged.
@@ -2826,22 +2547,11 @@ private:
     XrSession session_ = XR_NULL_HANDLE;
     XrSpace appSpace_ = XR_NULL_HANDLE;
     XrSpace viewSpace_ = XR_NULL_HANDLE;
-    XrActionSet controllerActionSet_ = XR_NULL_HANDLE;
-    static constexpr const char* kFrameControllerExtensionName =
-        "XR_VALVE_frame_controller_interaction";
-    bool frameControllerExtensionEnabled_ = false;
-    XrAction thumbstickAction_ = XR_NULL_HANDLE;
-    XrAction aimAction_ = XR_NULL_HANDLE;
-    XrAction triggerAction_ = XR_NULL_HANDLE;
-    XrAction gripAction_ = XR_NULL_HANDLE;
-    XrAction primaryButtonAction_ = XR_NULL_HANDLE;
-    bool actionsFocused_ = false;
-    std::array<XrSpace, 2> aimSpaces_{XR_NULL_HANDLE, XR_NULL_HANDLE};
+    openxr_input::ControllerInput controllerInput_;
     uint64_t performanceGeneration_ = 0;
     PFN_xrGetDisplayRefreshRateFB getDisplayRefreshRate_ = nullptr;
     OpenXrRuntimeMetrics runtimeMetrics_;
     bool runtimeMetricsExtensionEnabled_ = false;
-    std::array<XrPath, 2> handPaths_{XR_NULL_PATH, XR_NULL_PATH};
     XrSessionState sessionState_ = XR_SESSION_STATE_UNKNOWN;
     XrViewConfigurationType viewType_ = XR_VIEW_CONFIGURATION_TYPE_PRIMARY_STEREO;
     XrEnvironmentBlendMode blendMode_ = XR_ENVIRONMENT_BLEND_MODE_OPAQUE;
