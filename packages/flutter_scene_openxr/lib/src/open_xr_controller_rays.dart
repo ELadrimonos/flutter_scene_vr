@@ -49,7 +49,10 @@ class OpenXrControllerRays {
   ];
   static final _pressedColor = vm.Vector4.all(1);
   final Scene scene;
-  final _root = Node(name: 'xr-controller-rays');
+
+  /// Name of the node holding every ray, so scene queries can skip them.
+  static const rootName = 'xr-controller-rays';
+  final _root = Node(name: rootName);
   final _aims = <Node>[];
   final _materials = <UnlitMaterial>[];
 

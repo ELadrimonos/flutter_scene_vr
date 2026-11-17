@@ -1,4 +1,6 @@
-import 'package:example_app/example_chrome.dart' show galleryBackgroundColor;
+import 'package:example_app/example_chrome.dart'
+    show galleryBackgroundColor, galleryGrabbableNodeName;
+import 'package:example_app/gallery_grabbable.dart';
 import 'package:flutter/gestures.dart';
 import 'package:flutter/widgets.dart';
 import 'package:flutter_scene/scene.dart';
@@ -36,6 +38,12 @@ class OpenXrGalleryScene extends StatefulWidget {
 
 class _OpenXrGallerySceneState extends State<OpenXrGalleryScene> {
   late final OpenXrDirectEyeRenderer _renderer;
+  final _grab = OpenXrGrab(
+    nodeName: galleryGrabbableNodeName,
+    onGrab: galleryGrabbable.grab,
+    onRelease: galleryGrabbable.release,
+    onPrimaryButton: (_) => galleryGrabbable.togglePrimary(),
+  );
   late final Future<void> Function(int, int, int) _renderCallback;
   bool _attached = false;
 
@@ -45,7 +53,9 @@ class _OpenXrGallerySceneState extends State<OpenXrGalleryScene> {
     _renderer = OpenXrDirectEyeRenderer(
       scene: widget.scene,
       backgroundColor: widget.passthrough ? null : galleryBackgroundColor,
-      controllerNavigation: true,
+      // In passthrough the scene must stay pinned to the real room.
+      controllerNavigation: !widget.passthrough,
+      panelOcclusion: widget.passthrough,
       showControllerRays: true,
       antiAliasingMode:
           null, // Inherit the actual example, including automatic MSAA.
@@ -54,6 +64,8 @@ class _OpenXrGallerySceneState extends State<OpenXrGalleryScene> {
           widget.view.cameraBuilder?.call(elapsed) ??
           widget.scene.camera ??
           PerspectiveCamera(),
+      onControllers: (controllers, worldFromReference) =>
+          _grab.update(widget.scene, controllers, worldFromReference),
       onTick: (elapsed, delta) {
         widget.tick(elapsed, delta);
         widget.onFrame(widget.scene, elapsed, delta);

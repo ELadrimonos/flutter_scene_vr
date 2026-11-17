@@ -33,6 +33,9 @@ std::atomic<uint64_t> gPanelLayoutGeneration{0};
 std::atomic_bool gQuarantinedGpuSession{false};
 // Set from the UI thread; the render loop reads it once per frame.
 std::atomic_bool gPassthroughRequested{false};
+// Bit per panel with scene content between it and the viewer, which the host
+// layers over that panel in passthrough. Set from the UI thread.
+std::atomic_uint32_t gOccludedPanelsMask{0};
 std::mutex gResolutionMutex;
 uint64_t gResolutionRequestId = 0;
 std::optional<std::pair<uint64_t, double>> gResolutionRequest;
@@ -233,7 +236,10 @@ public:
 
         LOGI("Created OpenGL ES %d context", contextVersion);
         directLeftEyeAvailable_ = flutterShareContext != EGL_NO_CONTEXT;
-        return InitializeCopyProgram();
+        if (!InitializeCopyProgram()) return false;
+        // Optional: without it, panels simply cover passthrough scene content.
+        if (!InitializeOccluderProgram()) LOGE("Panel occluders unavailable");
+        return true;
     }
 
     // NativeActivity destruction can already be waiting for this thread, so
@@ -293,6 +299,7 @@ public:
         if (quadVertexArray_ != 0) glDeleteVertexArrays(1, &quadVertexArray_);
         if (quadVertexBuffer_ != 0) glDeleteBuffers(1, &quadVertexBuffer_);
         if (copyProgram_ != 0) glDeleteProgram(copyProgram_);
+        if (occluderProgram_ != 0) glDeleteProgram(occluderProgram_);
         if (framebuffer_ != 0) glDeleteFramebuffers(1, &framebuffer_);
 
         if (display_ != EGL_NO_DISPLAY) {
@@ -476,10 +483,16 @@ public:
         const std::array<XrVector2f, 2>& thumbsticks,
         const std::array<double, 18>& aims,
         uint64_t sequence,
-        const std::optional<std::array<double, 11>>& panelInput) {
+        const std::optional<std::array<double, 11>>& panelInput,
+        const std::array<double, 20>& panelPoses,
+        const std::array<float, 2>& sceneGrips,
+        const std::array<bool, 2>& primaryButtons) {
         if (views.size() != 2) return;
 
-        std::vector<double> values(panelInput ? 56 : 45);
+        // With panels: 45 legacy, 11 panel input, 20 panel poses. Four values
+        // always close the packet: the two scene grips, then the two primary
+        // (A/X) buttons.
+        std::vector<double> values((panelInput ? 76 : 45) + 4);
         values[0] = static_cast<double>(sequence);
         for (size_t eyeIndex = 0; eyeIndex < views.size(); ++eyeIndex) {
             const XrView& view = views[eyeIndex];
@@ -501,7 +514,15 @@ public:
         values[25] = thumbsticks[1].x;
         values[26] = thumbsticks[1].y;
         std::copy(aims.begin(), aims.end(), values.begin() + 27);
-        if (panelInput) std::copy(panelInput->begin(), panelInput->end(), values.begin() + 45);
+        if (panelInput) {
+            std::copy(panelInput->begin(), panelInput->end(), values.begin() + 45);
+            std::copy(panelPoses.begin(), panelPoses.end(), values.begin() + 56);
+        }
+        const size_t tail = values.size() - 4;
+        values[tail] = sceneGrips[0];
+        values[tail + 1] = sceneGrips[1];
+        values[tail + 2] = primaryButtons[0] ? 1 : 0;
+        values[tail + 3] = primaryButtons[1] ? 1 : 0;
 
         bool attached = false;
         JNIEnv* env = AttachToJava(attached);
@@ -667,11 +688,64 @@ public:
             targetIsSrgb);
     }
 
+    // Copies what one eye sees across a floating panel's rectangle into that
+    // panel's occluder image (same pose and size as the panel quad).
+    //
+    // SteamVR keeps quad layers above the scene, so scene content in front of
+    // a panel would be hidden by it. The occluder image goes in a quad drawn
+    // over the panel, visible to this eye only. The scene already cut a hole
+    // (alpha 0) wherever the panel is nearer than its content, so only what is
+    // really in front of the panel survives; the panel's text itself always
+    // comes from its own sharp compositor quad.
+    void ProjectEyeOntoPanel(
+        GLuint targetTexture,
+        int targetWidth,
+        int targetHeight,
+        GLuint eyeTexture,
+        const XrView& view,
+        const XrPosef& panelPose,
+        const XrExtent2Df& panelSize) {
+        if (occluderProgram_ == 0) return;
+        glBindFramebuffer(GL_FRAMEBUFFER, framebuffer_);
+        glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, targetTexture, 0);
+        glViewport(0, 0, targetWidth, targetHeight);
+        glDisable(GL_DEPTH_TEST);
+        glDisable(GL_CULL_FACE);
+        glDisable(GL_BLEND);
+
+        auto model = PoseMatrix(panelPose);
+        // The unit quad spans [-1, 1]; scale it to the panel's half size.
+        for (int row = 0; row < 3; ++row) {
+            model[row] *= panelSize.width * 0.5f;
+            model[4 + row] *= panelSize.height * 0.5f;
+        }
+        const auto eyeFromPanel = Multiply(
+            Multiply(ProjectionFromFov(view.fov, 0.05f, 100.0f), InvertRigid(PoseMatrix(view.pose))),
+            model);
+
+        glUseProgram(occluderProgram_);
+        glUniformMatrix4fv(occluderEyeFromPanelUniform_, 1, GL_FALSE, eyeFromPanel.data());
+        glActiveTexture(GL_TEXTURE0);
+        glBindTexture(GL_TEXTURE_2D, eyeTexture);
+        // The runtime's image has no mipmaps; sample its one level.
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+        glUniform1i(occluderTextureUniform_, 0);
+        glBindVertexArray(quadVertexArray_);
+        glDrawArrays(GL_TRIANGLE_STRIP, 0, 4);
+        glBindVertexArray(0);
+        glBindTexture(GL_TEXTURE_2D, 0);
+        glFlush();
+    }
+
     void DrawNativeFpsHud(GLuint texture, int fps, bool paused, bool hovered) {
         openxr_panels::DrawFpsHud(framebuffer_, texture, fps, paused, hovered);
     }
 
     bool HasFlutterFrame() const { return flutterSurface_.hasFrame; }
+    bool CanDrawPanelOccluders() const { return occluderProgram_ != 0; }
 
     bool DirectStereoReady() const {
         if (!directLeftEyeAvailable_) return false;
@@ -873,6 +947,114 @@ private:
         glFlush();
     }
 
+    using Mat4 = std::array<float, 16>;  // Column-major, like GL.
+
+    static Mat4 Multiply(const Mat4& a, const Mat4& b) {
+        Mat4 result{};
+        for (int column = 0; column < 4; ++column) {
+            for (int row = 0; row < 4; ++row) {
+                float sum = 0;
+                for (int k = 0; k < 4; ++k) sum += a[k * 4 + row] * b[column * 4 + k];
+                result[column * 4 + row] = sum;
+            }
+        }
+        return result;
+    }
+
+    static Mat4 PoseMatrix(const XrPosef& pose) {
+        const float x = pose.orientation.x, y = pose.orientation.y;
+        const float z = pose.orientation.z, w = pose.orientation.w;
+        return Mat4{
+            1 - 2 * (y * y + z * z), 2 * (x * y + z * w), 2 * (x * z - y * w), 0,
+            2 * (x * y - z * w), 1 - 2 * (x * x + z * z), 2 * (y * z + x * w), 0,
+            2 * (x * z + y * w), 2 * (y * z - x * w), 1 - 2 * (x * x + y * y), 0,
+            pose.position.x, pose.position.y, pose.position.z, 1,
+        };
+    }
+
+    // Inverse of a rotation plus translation: transpose, then move back.
+    static Mat4 InvertRigid(const Mat4& m) {
+        Mat4 result{};
+        for (int row = 0; row < 3; ++row) {
+            for (int column = 0; column < 3; ++column) result[column * 4 + row] = m[row * 4 + column];
+        }
+        for (int row = 0; row < 3; ++row) {
+            result[12 + row] = -(result[row] * m[12] + result[4 + row] * m[13] + result[8 + row] * m[14]);
+        }
+        result[15] = 1;
+        return result;
+    }
+
+    // OpenXR's asymmetric field of view as a GL clip-space projection.
+    static Mat4 ProjectionFromFov(const XrFovf& fov, float nearZ, float farZ) {
+        const float left = std::tan(fov.angleLeft), right = std::tan(fov.angleRight);
+        const float up = std::tan(fov.angleUp), down = std::tan(fov.angleDown);
+        const float width = right - left, height = up - down;
+        Mat4 result{};
+        result[0] = 2 / width;
+        result[5] = 2 / height;
+        result[8] = (right + left) / width;
+        result[9] = (up + down) / height;
+        result[10] = -(farZ + nearZ) / (farZ - nearZ);
+        result[11] = -1;
+        result[14] = -2 * farZ * nearZ / (farZ - nearZ);
+        return result;
+    }
+
+    // Resamples an eye image across a panel's rectangle (see
+    // ProjectEyeOntoPanel). Clip coordinates are linear across the panel
+    // plane, so they interpolate exactly and divide per fragment.
+    bool InitializeOccluderProgram() {
+        static constexpr char kVertexShader[] = R"(#version 300 es
+            layout(location = 0) in vec2 aPosition;
+            uniform mat4 uEyeFromPanel;
+            out vec4 vClip;
+            void main() {
+                vClip = uEyeFromPanel * vec4(aPosition, 0.0, 1.0);
+                gl_Position = vec4(aPosition, 0.0, 1.0);
+            }
+        )";
+        static constexpr char kFragmentShader[] = R"(#version 300 es
+            precision highp float;
+            in vec4 vClip;
+            uniform sampler2D uEye;
+            out vec4 fragColor;
+            void main() {
+                vec2 uv = vClip.xy / vClip.w * 0.5 + 0.5;
+                if (vClip.w <= 0.0 || any(lessThan(uv, vec2(0.0))) ||
+                    any(greaterThan(uv, vec2(1.0)))) {
+                    fragColor = vec4(0.0);
+                    return;
+                }
+                // Premultiplied scene color, alpha 0 where the panel is nearer.
+                // Same format as the eye, so no color conversion is needed.
+                fragColor = texture(uEye, uv);
+            }
+        )";
+        const GLuint vertex = CompileShader(GL_VERTEX_SHADER, kVertexShader);
+        const GLuint fragment = CompileShader(GL_FRAGMENT_SHADER, kFragmentShader);
+        if (vertex == 0 || fragment == 0) return false;
+        occluderProgram_ = glCreateProgram();
+        glAttachShader(occluderProgram_, vertex);
+        glAttachShader(occluderProgram_, fragment);
+        glLinkProgram(occluderProgram_);
+        glDeleteShader(vertex);
+        glDeleteShader(fragment);
+        GLint linked = GL_FALSE;
+        glGetProgramiv(occluderProgram_, GL_LINK_STATUS, &linked);
+        if (linked != GL_TRUE) {
+            std::array<char, 2048> message{};
+            glGetProgramInfoLog(occluderProgram_, message.size(), nullptr, message.data());
+            LOGE("Panel occluder program link failed: %s", message.data());
+            glDeleteProgram(occluderProgram_);
+            occluderProgram_ = 0;
+            return false;
+        }
+        occluderEyeFromPanelUniform_ = glGetUniformLocation(occluderProgram_, "uEyeFromPanel");
+        occluderTextureUniform_ = glGetUniformLocation(occluderProgram_, "uEye");
+        return true;
+    }
+
     // Only Flutter's UI atlas uses this copy shader in the direct-eye host.
     // Its Android texture orientation and sRGB conversion must not be applied
     // to scene eyes, whose camera/output passes already handle those contracts.
@@ -1051,6 +1233,9 @@ private:
     EGLSurface pbuffer_ = EGL_NO_SURFACE;
     GLuint framebuffer_ = 0;
     GLuint copyProgram_ = 0;
+    GLuint occluderProgram_ = 0;
+    GLint occluderEyeFromPanelUniform_ = -1;
+    GLint occluderTextureUniform_ = -1;
     GLuint quadVertexArray_ = 0;
     GLuint quadVertexBuffer_ = 0;
     GLint textureTransformUniform_ = -1;
@@ -1149,6 +1334,12 @@ public:
             xrDestroySwapchain(compositionQuadSwapchain_.handle);
         }
         compositionQuadSwapchain_ = {};
+        for (auto& panel : occluderSwapchains_) {
+            for (Swapchain& swapchain : panel) {
+                if (swapchain.handle != XR_NULL_HANDLE) xrDestroySwapchain(swapchain.handle);
+                swapchain = {};
+            }
+        }
         if (fpsHudSwapchain_.handle != XR_NULL_HANDLE) xrDestroySwapchain(fpsHudSwapchain_.handle);
         fpsHudSwapchain_ = {};
         if (viewSpace_ != XR_NULL_HANDLE) xrDestroySpace(viewSpace_);
@@ -1158,7 +1349,8 @@ public:
         if (aimAction_ != XR_NULL_HANDLE) xrDestroyAction(aimAction_);
         if (triggerAction_ != XR_NULL_HANDLE) xrDestroyAction(triggerAction_);
         if (gripAction_ != XR_NULL_HANDLE) xrDestroyAction(gripAction_);
-        aimAction_ = triggerAction_ = gripAction_ = XR_NULL_HANDLE;
+        if (primaryButtonAction_ != XR_NULL_HANDLE) xrDestroyAction(primaryButtonAction_);
+        aimAction_ = triggerAction_ = gripAction_ = primaryButtonAction_ = XR_NULL_HANDLE;
         if (thumbstickAction_ != XR_NULL_HANDLE) xrDestroyAction(thumbstickAction_);
         if (controllerActionSet_ != XR_NULL_HANDLE) xrDestroyActionSet(controllerActionSet_);
         if (session_ != XR_NULL_HANDLE) xrDestroySession(session_);
@@ -1257,8 +1449,14 @@ public:
                     // Compositor panels have their own depth system: submit far to near.
                     const bool leftFarther = openxr_panels::LengthSquared(openxr_panels::Sub(panelLayers[0].pose.position, panelHead_.position)) >
                         openxr_panels::LengthSquared(openxr_panels::Sub(panelLayers[1].pose.position, panelHead_.position));
-                    for (const int i : {leftFarther ? 0 : 1, leftFarther ? 1 : 0})
+                    for (const int i : {leftFarther ? 0 : 1, leftFarther ? 1 : 0}) {
                         layers.push_back(reinterpret_cast<const XrCompositionLayerBaseHeader*>(&panelLayers[i]));
+                        // Scene content in front of this panel, one quad per
+                        // eye, right above it and below any nearer panel.
+                        if ((panelOccluders_ & (1u << i)) == 0) continue;
+                        for (const auto& occluder : occluderLayers_[i])
+                            layers.push_back(reinterpret_cast<const XrCompositionLayerBaseHeader*>(&occluder));
+                    }
                 } else {
                     layers.push_back(reinterpret_cast<const XrCompositionLayerBaseHeader*>(&compositionQuad));
                 }
@@ -1780,7 +1978,15 @@ private:
         std::strncpy(gripInfo.actionName, "panel_grip", XR_MAX_ACTION_NAME_SIZE - 1);
         std::strncpy(gripInfo.localizedActionName, "Move floating panel", XR_MAX_LOCALIZED_ACTION_NAME_SIZE - 1);
         if (!CheckXr(xrCreateAction(controllerActionSet_, &gripInfo, &gripAction_), "xrCreateAction(grip)")) return false;
-        std::array<XrPath, 2> aimPaths{}, triggerPaths{}, gripPaths{};
+        XrActionCreateInfo primaryInfo = aimInfo;
+        primaryInfo.actionType = XR_ACTION_TYPE_BOOLEAN_INPUT;
+        std::strncpy(primaryInfo.actionName, "primary_button", XR_MAX_ACTION_NAME_SIZE - 1);
+        std::strncpy(primaryInfo.localizedActionName, "Primary button", XR_MAX_LOCALIZED_ACTION_NAME_SIZE - 1);
+        if (!CheckXr(xrCreateAction(controllerActionSet_, &primaryInfo, &primaryButtonAction_), "xrCreateAction(primary)")) return false;
+        std::array<XrPath, 2> aimPaths{}, triggerPaths{}, gripPaths{}, primaryPaths{};
+        // The lower face button of each hand: X on the left, A on the right.
+        if (!CheckXr(xrStringToPath(instance_, "/user/hand/left/input/x/click", &primaryPaths[0]), "primary path") ||
+            !CheckXr(xrStringToPath(instance_, "/user/hand/right/input/a/click", &primaryPaths[1]), "primary path")) return false;
         for (size_t hand = 0; hand < 2; ++hand) {
             const char* aimPath = hand == 0 ? "/user/hand/left/input/aim/pose" : "/user/hand/right/input/aim/pose";
             const char* triggerPath = hand == 0 ? "/user/hand/left/input/trigger/value" : "/user/hand/right/input/trigger/value";
@@ -1794,11 +2000,16 @@ private:
             spaceInfo.poseInActionSpace.orientation.w = 1;
             if (!CheckXr(xrCreateActionSpace(session_, &spaceInfo, &aimSpaces_[hand]), "xrCreateActionSpace(aim)")) return false;
         }
-        const std::array<XrActionSuggestedBinding, 8> bindings{{
+        // The face buttons come last so a profile that rejects them can be
+        // retried without them.
+        constexpr uint32_t kBindingsWithoutFaceButtons = 8;
+        constexpr size_t kLeftPrimaryBinding = 8;
+        const std::array<XrActionSuggestedBinding, 10> bindings{{
             {thumbstickAction_, thumbstickPaths[0]}, {thumbstickAction_, thumbstickPaths[1]},
             {aimAction_, aimPaths[0]}, {aimAction_, aimPaths[1]},
             {triggerAction_, triggerPaths[0]}, {triggerAction_, triggerPaths[1]},
             {gripAction_, gripPaths[0]}, {gripAction_, gripPaths[1]},
+            {primaryButtonAction_, primaryPaths[0]}, {primaryButtonAction_, primaryPaths[1]},
         }};
         XrInteractionProfileSuggestedBinding suggestedBindings{
             XR_TYPE_INTERACTION_PROFILE_SUGGESTED_BINDING};
@@ -1823,11 +2034,28 @@ private:
                         "/interaction_profiles/valve/frame_controller_valve",
                         &frameControllerProfile),
                     "xrStringToPath(Frame controller profile)")) {
+                // The Frame puts A/B/X/Y all on the right controller and a d-pad
+                // on the left, like a gamepad. The primary button is the bottom
+                // position on each: A on the right, d-pad down on the left.
+                XrPath framePrimaryLeft = XR_NULL_PATH;
+                auto frameBindings = bindings;
+                if (CheckXr(xrStringToPath(instance_, "/user/hand/left/input/dpad_down/click", &framePrimaryLeft),
+                        "Frame primary path")) {
+                    frameBindings[kLeftPrimaryBinding].binding = framePrimaryLeft;
+                }
+                suggestedBindings.suggestedBindings = frameBindings.data();
                 suggestedBindings.interactionProfile = frameControllerProfile;
                 if (CheckXr(
                         xrSuggestInteractionProfileBindings(instance_, &suggestedBindings),
                         "xrSuggestInteractionProfileBindings(Frame controller)")) {
                     LOGI("OpenXR Steam Frame Controller profile bindings suggested");
+                } else {
+                    suggestedBindings.countSuggestedBindings = kBindingsWithoutFaceButtons;
+                    if (CheckXr(
+                            xrSuggestInteractionProfileBindings(instance_, &suggestedBindings),
+                            "xrSuggestInteractionProfileBindings(Frame controller, no face buttons)")) {
+                        LOGI("OpenXR Steam Frame Controller bindings suggested without face buttons");
+                    }
                 }
             }
         }
@@ -1912,6 +2140,20 @@ private:
             XrActionStateFloat state{XR_TYPE_ACTION_STATE_FLOAT};
             if (XR_SUCCEEDED(xrGetActionStateFloat(session_, &info, &state)) && state.isActive)
                 values[hand] = state.currentState;
+        }
+        return values;
+    }
+
+    std::array<bool,2> ReadPrimaryButtons() const {
+        std::array<bool,2> values{};
+        if (!actionsFocused_) return values;
+        for (int hand=0;hand<2;++hand) {
+            XrActionStateGetInfo info{XR_TYPE_ACTION_STATE_GET_INFO};
+            info.action = primaryButtonAction_;
+            info.subactionPath = handPaths_[hand];
+            XrActionStateBoolean state{XR_TYPE_ACTION_STATE_BOOLEAN};
+            if (XR_SUCCEEDED(xrGetActionStateBoolean(session_, &info, &state)) && state.isActive)
+                values[hand] = state.currentState == XR_TRUE;
         }
         return values;
     }
@@ -2013,7 +2255,9 @@ private:
             }
 
             XrSwapchainCreateInfo createInfo{XR_TYPE_SWAPCHAIN_CREATE_INFO};
-            createInfo.usageFlags = XR_SWAPCHAIN_USAGE_COLOR_ATTACHMENT_BIT;
+            // Sampled too: panel occluders read scene content back from the eyes.
+            createInfo.usageFlags =
+                XR_SWAPCHAIN_USAGE_COLOR_ATTACHMENT_BIT | XR_SWAPCHAIN_USAGE_SAMPLED_BIT;
             createInfo.format = colorFormat_;
             createInfo.sampleCount = 1;
             createInfo.width = swapchain.width;
@@ -2156,6 +2400,7 @@ private:
         const auto publishStarted = PerformanceClock::now();
         const auto thumbsticks = ReadThumbsticks();
         const auto aims = ReadControllerAims(displayTime);
+        const auto grips = ReadGrips();
         const bool rendererReady = renderer_.DirectStereoReady();
         std::optional<std::array<double,11>> panelInput;
         if (compositionQuadConfiguration_.panelSplitPixels > 0) {
@@ -2170,12 +2415,20 @@ private:
             const bool hovered = panelControls_.hudHovered;
             panelControls_.Update(panelHead_, compositionQuadConfiguration_.pose,
                 compositionQuadConfiguration_.size, compositionQuadConfiguration_.panelSplitPixels,
-                compositionQuadConfiguration_.textureWidth, aims, ReadGrips(), thumbsticks, dt, rendererReady);
+                compositionQuadConfiguration_.textureWidth, aims, grips, thumbsticks, dt, rendererReady);
             if (paused != panelControls_.uiPaused || hovered != panelControls_.hudHovered) fpsHudDirty_ = true;
             panelInput = panelControls_.Pack(compositionQuadConfiguration_.panelSplitPixels,
                 compositionQuadConfiguration_.textureWidth, compositionQuadConfiguration_.textureHeight);
         }
-        renderer_.PublishViews(views_, thumbsticks, aims, currentViewSequence, panelInput);
+        // Grips holding a panel read as released so scene content ignores them.
+        std::array<float, 2> sceneGrips = grips;
+        if (panelInput) {
+            for (int hand = 0; hand < 2; ++hand) {
+                if (panelControls_.PanelGrabbed(hand)) sceneGrips[hand] = 0;
+            }
+        }
+        renderer_.PublishViews(views_, thumbsticks, aims, currentViewSequence, panelInput,
+            panelControls_.PackPoses(), sceneGrips, ReadPrimaryButtons());
         const auto publishFinished = PerformanceClock::now();
         // UI OFF bypasses SurfaceTexture latching and every Flutter panel copy.
         // The direct eye surfaces and their GPU ownership remain unchanged.
@@ -2283,6 +2536,12 @@ private:
             frameTokens,
             currentViewSequence);
         const auto directRenderFinished = PerformanceClock::now();
+        panelOccluders_ = 0;
+        const uint32_t requested = passthroughActive_ ? gOccludedPanelsMask.load() & 3u : 0u;
+        if (directResult == DirectEyeRenderResult::presented && requested != 0 &&
+            PanelOccludersPossible()) {
+            panelOccluders_ = RenderPanelOccluders(requested, colorTextures);
+        }
         if (directResult == DirectEyeRenderResult::unresolved) {
             // One or both images may still be owned by Flutter. Releasing
             // either would permit the runtime to reuse a possibly in-flight
@@ -2331,6 +2590,84 @@ private:
         layer.viewCount = projectionViews.size();
         layer.views = projectionViews.data();
         return ProjectionResult::rendered;
+    }
+
+    bool PanelOccludersPossible() const {
+        return renderer_.CanDrawPanelOccluders() && !panelControls_.uiPaused &&
+            panelControls_.initialized && compositionQuadConfiguration_.Enabled() &&
+            compositionQuadConfiguration_.panelSplitPixels > 0 &&
+            !compositionQuadConfiguration_.headLocked && renderer_.HasFlutterFrame();
+    }
+
+    // Fills, for each requested panel, one occluder quad per eye with the
+    // scene content in front of that panel (see ProjectEyeOntoPanel). Must
+    // run while the eye images are still acquired. Returns the panels done.
+    uint32_t RenderPanelOccluders(uint32_t mask, const std::array<GLuint, 2>& eyeTextures) {
+        uint32_t done = 0;
+        for (int panel = 0; panel < 2; ++panel) {
+            if ((mask & (1u << panel)) == 0) continue;
+            const XrExtent2Df size = panelControls_.sizes[panel];
+            if (size.width <= 0 || size.height <= 0) continue;
+            bool rendered = true;
+            for (int eye = 0; eye < 2 && rendered; ++eye) {
+                rendered = RenderPanelOccluder(panel, eye, size, eyeTextures[eye]);
+            }
+            if (rendered) done |= 1u << panel;
+        }
+        return done;
+    }
+
+    bool RenderPanelOccluder(int panel, int eye, const XrExtent2Df& size, GLuint eyeTexture) {
+        // About the eye images' density over a panel at arm's length.
+        constexpr float kLongestSide = 1024;
+        const float aspect = size.width / size.height;
+        const int width = std::max(16, static_cast<int>(std::lround(
+            aspect >= 1 ? kLongestSide : kLongestSide * aspect)));
+        const int height = std::max(16, static_cast<int>(std::lround(
+            aspect >= 1 ? kLongestSide / aspect : kLongestSide)));
+
+        Swapchain& swapchain = occluderSwapchains_[panel][eye];
+        if (swapchain.handle != XR_NULL_HANDLE &&
+            (swapchain.width != width || swapchain.height != height)) {
+            xrDestroySwapchain(swapchain.handle);
+            swapchain = {};
+        }
+        if (swapchain.handle == XR_NULL_HANDLE && !CreateUiSwapchain(swapchain, width, height)) {
+            if (swapchain.handle != XR_NULL_HANDLE) xrDestroySwapchain(swapchain.handle);
+            swapchain = {};
+            return false;
+        }
+
+        uint32_t imageIndex = 0;
+        XrSwapchainImageAcquireInfo acquireInfo{XR_TYPE_SWAPCHAIN_IMAGE_ACQUIRE_INFO};
+        if (!CheckXr(xrAcquireSwapchainImage(swapchain.handle, &acquireInfo, &imageIndex),
+                "xrAcquireSwapchainImage(panel occluder)")) {
+            return false;
+        }
+        XrSwapchainImageWaitInfo waitInfo{XR_TYPE_SWAPCHAIN_IMAGE_WAIT_INFO};
+        waitInfo.timeout = XR_INFINITE_DURATION;
+        const bool waited = CheckXr(xrWaitSwapchainImage(swapchain.handle, &waitInfo),
+            "xrWaitSwapchainImage(panel occluder)");
+        if (waited) {
+            renderer_.ProjectEyeOntoPanel(swapchain.images[imageIndex].image, width, height,
+                eyeTexture, views_[eye], panelControls_.panels[panel], size);
+        }
+        XrSwapchainImageReleaseInfo releaseInfo{XR_TYPE_SWAPCHAIN_IMAGE_RELEASE_INFO};
+        const bool released = CheckXr(xrReleaseSwapchainImage(swapchain.handle, &releaseInfo),
+            "xrReleaseSwapchainImage(panel occluder)");
+        if (!waited || !released) return false;
+
+        XrCompositionLayerQuad& layer = occluderLayers_[panel][eye];
+        layer = {XR_TYPE_COMPOSITION_LAYER_QUAD};
+        layer.layerFlags = XR_COMPOSITION_LAYER_BLEND_TEXTURE_SOURCE_ALPHA_BIT;
+        layer.space = appSpace_;
+        layer.eyeVisibility = eye == 0 ? XR_EYE_VISIBILITY_LEFT : XR_EYE_VISIBILITY_RIGHT;
+        layer.subImage.swapchain = swapchain.handle;
+        layer.subImage.imageRect = {{0, 0}, {width, height}};
+        layer.subImage.imageArrayIndex = 0;
+        layer.pose = panelControls_.panels[panel];
+        layer.size = size;
+        return true;
     }
 
     ProjectionResult RenderCompositionQuad(XrCompositionLayerQuad& layer) {
@@ -2497,6 +2834,7 @@ private:
     XrAction aimAction_ = XR_NULL_HANDLE;
     XrAction triggerAction_ = XR_NULL_HANDLE;
     XrAction gripAction_ = XR_NULL_HANDLE;
+    XrAction primaryButtonAction_ = XR_NULL_HANDLE;
     bool actionsFocused_ = false;
     std::array<XrSpace, 2> aimSpaces_{XR_NULL_HANDLE, XR_NULL_HANDLE};
     uint64_t performanceGeneration_ = 0;
@@ -2510,6 +2848,11 @@ private:
     XrEnvironmentBlendMode opaqueBlendMode_ = XR_ENVIRONMENT_BLEND_MODE_OPAQUE;
     std::optional<XrEnvironmentBlendMode> passthroughBlendMode_;
     bool passthroughActive_ = false;
+    // Panels (bit per index) with scene content in front of them this frame,
+    // whose per-eye occluder quads go right above the panel quad.
+    uint32_t panelOccluders_ = 0;
+    std::array<std::array<Swapchain, 2>, 2> occluderSwapchains_{};
+    std::array<std::array<XrCompositionLayerQuad, 2>, 2> occluderLayers_{};
     std::vector<XrViewConfigurationView> configurationViews_;
     std::vector<XrView> views_;
     std::vector<Swapchain> swapchains_;
@@ -2656,6 +2999,12 @@ Java_dev_bdero_flutter_1scene_1openxr_FlutterSceneOpenXrActivity_nativeRequestRe
     const auto request = ++gResolutionRequestId;
     gResolutionRequest = std::make_pair(request, scale);
     return static_cast<jlong>(request);
+}
+
+extern "C" JNIEXPORT void JNICALL
+Java_dev_bdero_flutter_1scene_1openxr_FlutterSceneOpenXrActivity_nativeSetOccludedPanels(
+    JNIEnv*, jobject, jint mask) {
+    gOccludedPanelsMask.store(static_cast<uint32_t>(mask));
 }
 
 extern "C" JNIEXPORT void JNICALL

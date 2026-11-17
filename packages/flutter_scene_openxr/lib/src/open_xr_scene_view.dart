@@ -6,8 +6,10 @@ import 'package:flutter_gpu/gpu.dart' as gpu;
 import 'package:flutter_scene/scene.dart';
 
 import 'open_xr_camera.dart';
+import 'open_xr_controller_state.dart';
 import 'open_xr_controller_rays.dart';
 import 'open_xr_navigation.dart';
+import 'open_xr_panel_occlusion.dart';
 import 'open_xr_session.dart';
 
 /// Renders native-owned eye frames without converting scene textures to images.
@@ -21,6 +23,8 @@ class OpenXrDirectEyeRenderer {
     this.controllerNavigation = false,
     this.showControllerRays = false,
     this.backgroundColor,
+    this.onControllers,
+    this.panelOcclusion = false,
   }) : session = session ?? OpenXrSession.instance;
 
   final Scene scene;
@@ -32,9 +36,26 @@ class OpenXrDirectEyeRenderer {
   final Camera Function(Duration elapsed)? referenceCamera;
   final bool controllerNavigation;
 
+  /// Runs on the XR frame clock with this frame's controllers and the
+  /// reference-to-world transform, after navigation and before rendering.
+  /// Scene edits made here show up in the same frame.
+  final void Function(
+    OpenXrControllerState controllers,
+    vm.Matrix4? worldFromReference,
+  )?
+  onControllers;
+
   // Background behind transparent scene pixels, independent of lighting and
   // tone mapping. The gallery supplies the same display color as its Scaffold.
   final Color? backgroundColor;
+
+  /// Keeps scene content correctly in front of or behind the host's floating
+  /// panels in passthrough (see [OpenXrSession.setPassthrough]). Panels stay
+  /// sharp compositor quads; content between a panel and the viewer is
+  /// layered over it by the host (see [OpenXrSession.setOccludedPanels]).
+  final bool panelOcclusion;
+  OpenXrPanelOcclusion? _panelOcclusion;
+  int _occludedPanels = 0;
 
   /// Renders tracked aim hints as unlit scene meshes, even with Flutter UI paused.
   final bool showControllerRays;
@@ -156,6 +177,22 @@ class OpenXrDirectEyeRenderer {
           delta,
         );
       }
+      onControllers?.call(frame.controllers, _worldFromReference);
+      if (panelOcclusion) {
+        final head = (frame.leftEye.position + frame.rightEye.position)
+          ..scale(0.5);
+        final occluded = (_panelOcclusion ??= OpenXrPanelOcclusion(scene))
+            .update(
+              frame.panelPlacements,
+              frame.uiPaused,
+              head,
+              _worldFromReference,
+            );
+        if (occluded != _occludedPanels) {
+          _occludedPanels = occluded;
+          unawaited(session.setOccludedPanels(occluded));
+        }
+      }
       if (showControllerRays) {
         // Lazily build geometry after the host has initialized Scene resources.
         (_controllerRays ??= OpenXrControllerRays(
@@ -232,6 +269,12 @@ class OpenXrDirectEyeRenderer {
     _clock.stop();
     _controllerRays?.dispose();
     _controllerRays = null;
+    _panelOcclusion?.dispose();
+    _panelOcclusion = null;
+    if (_occludedPanels != 0) {
+      _occludedPanels = 0;
+      unawaited(session.setOccludedPanels(0));
+    }
     _surfaces.clear();
   }
 

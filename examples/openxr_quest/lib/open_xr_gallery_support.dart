@@ -4,7 +4,7 @@ const galleryVrNotes = <String, String>{
   'VR':
       'Original floor, grid, shapes and lighting. Left stick rotates; right stick moves. Grip a panel to move it; held-hand stick pushes/pulls.',
   'Augmented Reality':
-      'Dash over the real room via passthrough (alpha-blend or additive environment blend, whichever the runtime offers; opaque if neither). Floor height is manual: there is no plane detection.',
+      'Dash over the real room via passthrough (alpha-blend or additive environment blend, whichever the runtime offers; opaque if neither). Floor height is manual: there is no plane detection. Sticks are off. Grip Dash to move him, release to drop or throw him (he bounces on the floor), stick pushes or pulls him while held, grip with both hands to scale; A/X (Frame: A or d-pad down) freezes him in the air.',
   'Car':
       'Authored showroom settings; automatic orbit becomes an initial tracked view. Wheel spin is elapsed-time based in both modes.',
   'Animation':

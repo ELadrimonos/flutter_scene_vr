@@ -26,9 +26,18 @@ class OpenXrControllerAim {
     required this.orientation,
     required this.tracked,
     required this.trigger,
+    this.grip = 0,
+    this.primaryButton = false,
   });
   final vm.Vector3 position;
   final vm.Quaternion orientation;
   final bool tracked;
   final double trigger;
+
+  /// Squeeze value in 0..1. Reads 0 while that grip is holding a floating
+  /// panel, and on hosts that do not report grips.
+  final double grip;
+
+  /// The lower face button: A on the right controller, X on the left.
+  final bool primaryButton;
 }

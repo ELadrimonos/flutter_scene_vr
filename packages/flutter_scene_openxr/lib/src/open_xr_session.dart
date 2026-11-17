@@ -64,6 +64,13 @@ class OpenXrSession {
   Future<void> setPassthrough(bool enabled) =>
       _channel.invokeMethod<void>('setPassthrough', enabled);
 
+  /// Panels (bit per panel index) with scene content in front of them. The
+  /// host keeps every panel a sharp compositor quad and, for these, adds a
+  /// per-eye quad above the panel carrying that content (read back from the
+  /// eye images). Only applies while passthrough is on.
+  Future<void> setOccludedPanels(int mask) =>
+      _channel.invokeMethod<void>('setOccludedPanels', mask);
+
   Future<void> resetPanels() => _channel.invokeMethod<void>('resetPanels');
 
   Future<void> exitImmersive() => _channel.invokeMethod<void>('exitImmersive');

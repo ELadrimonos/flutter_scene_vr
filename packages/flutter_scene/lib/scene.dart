@@ -91,6 +91,7 @@ export 'src/material/equirect_image.dart'
 export 'src/material/exr_decoder.dart' show ExrFormatException, decodeOpenExr;
 export 'src/material/hdr_decoder.dart'
     show DecodedHdr, HdrFormatException, decodeRadianceHdr;
+export 'src/material/holdout_material.dart' show HoldoutMaterial;
 export 'src/material/material.dart' show Material;
 export 'src/material/material_group.dart' show MaterialGroup;
 export 'src/material/material_parameters.dart' show MaterialParameters;

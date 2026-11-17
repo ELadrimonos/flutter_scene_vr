@@ -11,6 +11,10 @@ const galleryBackgroundColor = Color(0xfffdf7ff);
 // eye background transparent for these; every other example stays opaque.
 const galleryPassthroughExamples = <String>{'Augmented Reality'};
 
+// The headset gallery lets controller grips grab and two-hand scale the node
+// with this name (see gallery_grabbable.dart).
+const galleryGrabbableNodeName = 'gallery-grabbable';
+
 // Shared instructions for the demo's Controls card and the gallery Help tab.
 const galleryVrControlsHelp =
     'Aim + trigger: select.\n'

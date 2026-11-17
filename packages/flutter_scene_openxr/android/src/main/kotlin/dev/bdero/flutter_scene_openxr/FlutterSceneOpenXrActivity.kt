@@ -82,6 +82,7 @@ class FlutterSceneOpenXrActivity : NativeActivity() {
     private var pendingResolution: Pair<Long, MethodChannel.Result>? = null
     private external fun nativeRequestResolution(scale: Double): Long
     private external fun nativeSetPassthrough(enabled: Boolean)
+    private external fun nativeSetOccludedPanels(mask: Int)
 
     @Keep
     fun completeOpenXrResolutionChange(request: Long, scale: Double, width: Int, height: Int, error: String?) {
@@ -650,6 +651,11 @@ class FlutterSceneOpenXrActivity : NativeActivity() {
                         } else {
                             pendingResolution = nativeRequestResolution(scale) to result
                         }
+                        return@setMethodCallHandler
+                    }
+                    "setOccludedPanels" -> {
+                        nativeSetOccludedPanels((call.arguments as? Number)?.toInt() ?: 0)
+                        result.success(null)
                         return@setMethodCallHandler
                     }
                     "setPassthrough" -> {

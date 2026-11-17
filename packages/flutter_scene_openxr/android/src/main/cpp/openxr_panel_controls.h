@@ -152,6 +152,25 @@ public:
         if (uiPaused) hits = {};
     }
 
+    // Per panel: visible, pose (position xyz, orientation xyzw) and size wh,
+    // in app space. Lets the scene hold out the panels it should sit behind.
+    std::array<double,20> PackPoses() const {
+        std::array<double,20> result{};
+        for (int panel=0; panel<2; ++panel) {
+            const int at = panel*10;
+            const auto& pose = panels[panel];
+            result[at] = initialized ? 1 : 0;
+            result[at+1]=pose.position.x; result[at+2]=pose.position.y; result[at+3]=pose.position.z;
+            result[at+4]=pose.orientation.x; result[at+5]=pose.orientation.y;
+            result[at+6]=pose.orientation.z; result[at+7]=pose.orientation.w;
+            result[at+8]=sizes[panel].width; result[at+9]=sizes[panel].height;
+        }
+        return result;
+    }
+
+    // A grip that grabbed a panel belongs to the panel, not to scene content.
+    bool PanelGrabbed(int hand) const { return grabs_[hand].panel >= 0; }
+
     // Optional extension after the legacy 45 values: pause, two panel/pixel
     // triples, then the two arbitrated navigation sticks. Same frame/poses.
     std::array<double,11> Pack(int split, int width, int height) const {
