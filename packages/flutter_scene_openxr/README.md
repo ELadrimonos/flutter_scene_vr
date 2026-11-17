@@ -23,6 +23,7 @@ plugin bundled into an APK, not a headset driver or an operating-system componen
 - **Quest gallery in flat mode** - The gallery uses ordinary Flutter presentation. The plugin may check availability or launch immersive mode, but its OpenXR eye-rendering loop is not running just because the app is visible as a flat Quest window.
 - **Ordinary Flutter Scene applications** - Depending on `flutter_scene` alone does not enable this package. An application must include the plugin and explicitly launch/connect its immersive presentation.
 - **Web and desktop** - The Android native host does not run there. Flutter Scene retains its ordinary view rendering. The package also contains a side-by-side stereo widget, but displaying that widget does not create a headset session.
+- **Steam Frame** - The gallery also runs on Valve's Steam Frame inside its Lepton Android container, under SteamVR's OpenXR runtime, using the native Frame Controller profile when the runtime offers it. See the gallery README for deployment.
 - **Other Android headsets** - The code uses OpenXR, but that is not evidence of support on every headset. Runtime discovery, GLES integration, controller bindings, optional extensions, and actual rendering must be checked for each device.
 - **Visual Space product** - As checked on 2026-08-31, the separate Visual Space application's `app-vs` does not depend on this plugin. Its MQ3 mode uses its own `VisualSpaceXrActivity` and native world renderer. The gallery and the product can both use OpenXR without using the same host implementation.
 
@@ -138,7 +139,28 @@ when a static frame initially looks correct.
 - **Panel manipulation** - In the gallery, a controller grip grabs the aimed panel and that hand's stick pushes or pulls it. Panels remain where released. The reset action restores their starting layout.
 - **Input arbitration** - A stick aimed at UI is reserved for panel interaction/scrolling; navigation uses the remaining unclaimed input. Away from panels, the gallery's left stick orbits and the right stick translates the navigation rig.
 - **Controller rays** - Optional rays are Flutter Scene meshes driven by tracked aim poses. The gallery rays are direction hints, not general-purpose scene picking or object manipulation. Their tips do not claim to mark scene-surface intersections.
-- **Application responsibility** - The gallery supplies widgets, routing, and its scheduler gate. The plugin does not automatically turn arbitrary application pages into panels or provide document editing, authentication, persistence, collaboration, or hand-manipulation tools.
+- **Application responsibility** - The gallery supplies widgets, routing, and its scheduler gate. The plugin does not automatically turn arbitrary application pages into panels or provide document editing, authentication, persistence, or collaboration.
+
+## Controllers
+
+- **One action set** - The host creates thumbstick, aim, trigger, grip, and primary-button actions for both hands and samples them once per frame, in the same space and predicted time as the eyes. Each frame's sample reaches Dart as `OpenXrControllerState`; a grip that is holding a panel reads as released there.
+- **Bindings as data** - [openxr_interaction_profiles.h](android/src/main/cpp/openxr_interaction_profiles.h) maps those actions to each supported controller's input paths. Adding a controller or moving an action to another button only touches that table. Optional paths, such as the face buttons, are dropped if a runtime rejects them instead of losing the whole profile.
+- **Supported profiles** - Meta Quest Touch, which other runtimes also remap onto their own controllers, and the Steam Frame Controller when the runtime offers `XR_VALVE_frame_controller_interaction`.
+
+| Action | Touch | Steam Frame Controller |
+| --- | --- | --- |
+| Primary button | X (left), A (right) | D-pad down (left), A (right) |
+| Grip | Squeeze | Squeeze |
+| Trigger, thumbstick, aim | Same paths on both | Same paths on both |
+
+The Frame Controller is laid out like a gamepad split in two: A/B/X/Y all sit on the right controller and a d-pad on the left, so the primary button is the bottom position of each.
+
+## Passthrough and scene objects
+
+- **Passthrough** - `OpenXrSession.setPassthrough(true)` selects the runtime's alpha-blend environment blend mode (additive as a fallback; opaque if it offers neither) and flags the scene layer to blend by alpha. The scene must render with a transparent background, as the renderer does when `backgroundColor` is null.
+- **Panels and scene depth** - SteamVR composites quad layers above the scene whatever their submission order, so a panel would always hide scene content in front of it. With `panelOcclusion`, each panel gets an invisible `HoldoutMaterial` quad in the scene that writes the panel's depth and clears the pixel to alpha 0. When visible content is between the viewer and a panel, the host copies what each eye sees across that panel into a per-eye quad above it. Panels themselves always stay sharp compositor quads.
+- **Grabbing** - `OpenXrGrab` lets controller grips grab a named scene node: one hand moves it and its stick pushes it along the aim ray, two hands scale it about their midpoint. Callbacks report the grab, the release velocity (for throws), and primary-button presses, so the node's owner can run its own physics.
+- **Bounds** - Picking and panel occlusion use bounding spheres. Skinned meshes are bounded by their joints' current positions, because their baked bind-pose bounds are much larger than the visible body.
 
 ## FPS diagnostics and UI suspension
 
@@ -173,12 +195,15 @@ when a static frame initially looks correct.
 - **Stereo renderer** - [open_xr_scene_view.dart](lib/src/open_xr_scene_view.dart) contains `OpenXrDirectEyeRenderer` and the retained image-based `OpenXrSceneView`.
 - **Camera and frame data** - [open_xr_camera.dart](lib/src/open_xr_camera.dart), [open_xr_eye_view.dart](lib/src/open_xr_eye_view.dart), [open_xr_frame.dart](lib/src/open_xr_frame.dart), and [open_xr_controller_state.dart](lib/src/open_xr_controller_state.dart) describe tracked views and input.
 - **Navigation and rays** - [open_xr_navigation.dart](lib/src/open_xr_navigation.dart) and [open_xr_controller_rays.dart](lib/src/open_xr_controller_rays.dart) adapt tracked input to optional scene navigation and visible aim hints.
+- **Grabbing and occlusion** - [open_xr_grab.dart](lib/src/open_xr_grab.dart), [open_xr_panel_occlusion.dart](lib/src/open_xr_panel_occlusion.dart), and [open_xr_bounds.dart](lib/src/open_xr_bounds.dart) implement controller grabbing and panel occlusion in passthrough.
 - **Panel contract** - [open_xr_composition_quad_configuration.dart](lib/src/open_xr_composition_quad_configuration.dart) defines texture and world-placement configuration.
 - **Performance models** - [open_xr_performance_monitor.dart](lib/src/open_xr_performance_monitor.dart) and [open_xr_native_performance_sample.dart](lib/src/open_xr_native_performance_sample.dart) collect and expose distinct timing/cadence measurements.
 - **Android launch plugin** - [FlutterSceneOpenXrPlugin.kt](android/src/main/kotlin/dev/bdero/flutter_scene_openxr/FlutterSceneOpenXrPlugin.kt) connects the flat activity to immersive entry.
 - **Immersive activity** - [FlutterSceneOpenXrActivity.kt](android/src/main/kotlin/dev/bdero/flutter_scene_openxr/FlutterSceneOpenXrActivity.kt) owns Android/Flutter coordination, surface delivery, input, and teardown.
 - **Native frame loop** - [flutter_scene_openxr.cpp](android/src/main/cpp/flutter_scene_openxr.cpp) owns OpenXR initialization, tracking, rendering coordination, and layer submission.
 - **Native helpers** - [openxr_panel_controls.h](android/src/main/cpp/openxr_panel_controls.h), [openxr_fps_hud.h](android/src/main/cpp/openxr_fps_hud.h), and [openxr_runtime_metrics.h](android/src/main/cpp/openxr_runtime_metrics.h) separate panel interaction and diagnostics from the host implementation.
+- **Controller input** - [openxr_controller_input.h](android/src/main/cpp/openxr_controller_input.h) owns the action set and per-frame sampling; [openxr_interaction_profiles.h](android/src/main/cpp/openxr_interaction_profiles.h) holds the per-controller bindings; [openxr_log.h](android/src/main/cpp/openxr_log.h) shares logging between them and the host.
+- **Tests** - [open_xr_frame_test.dart](test/open_xr_frame_test.dart) checks the native-to-Dart frame packet layout.
 - **Build declarations** - [pubspec.yaml](pubspec.yaml), [build.gradle.kts](android/build.gradle.kts), [CMakeLists.txt](android/src/main/cpp/CMakeLists.txt), and [AndroidManifest.xml](android/src/main/AndroidManifest.xml) define package registration and platform integration.
 
 ## Requirements and integration

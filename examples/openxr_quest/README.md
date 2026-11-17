@@ -62,6 +62,43 @@ build evidence, comparison procedure and headset checklist. For native frame
 ownership and local engine prerequisites, see
 [DIRECT_SWAPCHAIN_RENDERING.md](DIRECT_SWAPCHAIN_RENDERING.md).
 
+## Steam Frame
+
+The same gallery runs on Valve's Steam Frame, inside its Lepton Android
+container. Start **Lepton Development** on the headset so adb has a container to
+reach, then run the Frame wrapper around the local-forks helper:
+
+```sh
+FRAME_ADB_TARGET=<headset-ip>:5555 ./examples/openxr_quest/tool/frame-build-and-deploy.sh
+```
+
+`FRAME_ADB_TARGET` defaults to `frame:5555`; set it to the headset's IP when that
+hostname does not resolve. Over USB, adb reaches the native Linux OS instead, so
+forward the port first (`adb forward tcp:5555 tcp:5555`) and use `localhost:5555`.
+The Frame Controller's face buttons differ from Touch (A/B/X/Y are all on the
+right controller, a d-pad on the left); the package README maps each action.
+
+## Augmented Reality
+
+**Augmented Reality** shows Dash in the real room through passthrough. Stick
+navigation is off, since the scene must stay pinned to the room. Set **Floor below
+head** to where the real floor is: there is no plane detection, and an invisible
+shadow catcher at that height puts Dash's shadow on the real floor.
+
+- **Grab** - Aim at Dash (or touch him) and hold grip; he follows the controller.
+  While held, that hand's stick pushes him away or pulls him closer.
+- **Scale** - While one hand holds him, grip with the other anywhere and move the
+  controllers apart or together.
+- **Drop and throw** - Released, he falls and bounces on the floor, keeping the
+  velocity of the release.
+- **Freeze** - The primary button (X/A on Touch; d-pad down/A on the Frame
+  Controller) freezes him in the air; press again to let him fall.
+- **Controls** - **Distance** and **Size** follow wherever the hands put him, and
+  move him from where he is.
+
+Panels stay sharp compositor quads and keep the right depth against Dash: a panel
+in front hides him, and he covers a panel he is in front of.
+
 ## Resolution and graphics comparisons
 
 At the top of **Settings**, select 50%, 67%, 75%, or 100% of the runtime's
