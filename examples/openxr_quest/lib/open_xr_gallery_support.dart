@@ -3,6 +3,8 @@
 const galleryVrNotes = <String, String>{
   'VR':
       'Original floor, grid, shapes and lighting. Left stick rotates; right stick moves. Grip a panel to move it; held-hand stick pushes/pulls.',
+  'Augmented Reality':
+      'Dash over the real room via passthrough (alpha-blend or additive environment blend, whichever the runtime offers; opaque if neither). Floor height is manual: there is no plane detection.',
   'Car':
       'Authored showroom settings; automatic orbit becomes an initial tracked view. Wheel spin is elapsed-time based in both modes.',
   'Animation':

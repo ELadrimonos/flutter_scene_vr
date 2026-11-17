@@ -12,6 +12,7 @@ class OpenXrGalleryScene extends StatefulWidget {
     required this.scene,
     required this.tick,
     required this.ready,
+    required this.passthrough,
     required this.onFrame,
     required this.onError,
     required this.onRenderer,
@@ -21,6 +22,10 @@ class OpenXrGalleryScene extends StatefulWidget {
   final Scene scene;
   final SceneTickCallback tick;
   final bool ready;
+
+  /// Shows the real room behind the scene: transparent eye background plus a
+  /// passthrough environment blend.
+  final bool passthrough;
   final void Function(Scene scene, Duration elapsed, double delta) onFrame;
   final void Function(Object error, StackTrace stack) onError;
   final void Function(OpenXrDirectEyeRenderer? renderer) onRenderer;
@@ -39,7 +44,7 @@ class _OpenXrGallerySceneState extends State<OpenXrGalleryScene> {
     super.initState();
     _renderer = OpenXrDirectEyeRenderer(
       scene: widget.scene,
-      backgroundColor: galleryBackgroundColor,
+      backgroundColor: widget.passthrough ? null : galleryBackgroundColor,
       controllerNavigation: true,
       showControllerRays: true,
       antiAliasingMode:
@@ -89,6 +94,7 @@ class _OpenXrGallerySceneState extends State<OpenXrGalleryScene> {
   Widget build(BuildContext context) {
     if (widget.ready && !_attached) {
       _attached = true;
+      OpenXrSession.instance.setPassthrough(widget.passthrough);
       OpenXrSession.instance.attachExternalEyeRenderer(_renderCallback);
       widget.onRenderer(_renderer);
     }

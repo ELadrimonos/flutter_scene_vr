@@ -81,6 +81,7 @@ class FlutterSceneOpenXrActivity : NativeActivity() {
     private val pendingStereoTokens = mutableSetOf<Long>()
     private var pendingResolution: Pair<Long, MethodChannel.Result>? = null
     private external fun nativeRequestResolution(scale: Double): Long
+    private external fun nativeSetPassthrough(enabled: Boolean)
 
     @Keep
     fun completeOpenXrResolutionChange(request: Long, scale: Double, width: Int, height: Int, error: String?) {
@@ -649,6 +650,11 @@ class FlutterSceneOpenXrActivity : NativeActivity() {
                         } else {
                             pendingResolution = nativeRequestResolution(scale) to result
                         }
+                        return@setMethodCallHandler
+                    }
+                    "setPassthrough" -> {
+                        nativeSetPassthrough(call.arguments == true)
+                        result.success(null)
                         return@setMethodCallHandler
                     }
                     "resetPanels" -> {

@@ -2,7 +2,10 @@ import 'dart:async';
 import 'dart:ui' as ui;
 
 import 'package:example_app/example_chrome.dart'
-    show galleryBackgroundColor, galleryVrControlsHelp;
+    show
+        galleryBackgroundColor,
+        galleryPassthroughExamples,
+        galleryVrControlsHelp;
 import 'package:example_app/example_registry.dart';
 import 'package:example_app/gallery_resolution.dart';
 import 'package:example_app/example_settings.dart';
@@ -188,6 +191,8 @@ class _OpenXrGalleryState extends State<OpenXrGallery> {
         // Drain any graphics change first, then stop native offers before
         // unmounting the old SceneView. Queued frames are explicitly discarded.
         await OpenXrSession.instance.suspendExternalEyeRenderer();
+        // Back to an opaque environment until the next scene asks otherwise.
+        await OpenXrSession.instance.setPassthrough(false);
         if (!mounted || request != _selectionRequest) return;
         debugPrint('Gallery switch request=$request old renderer drained');
       }
@@ -267,6 +272,7 @@ class _OpenXrGalleryState extends State<OpenXrGallery> {
       key: ObjectKey(scene),
       view: view,
       scene: scene,
+      passthrough: galleryPassthroughExamples.contains(_selected),
       tick: tick,
       ready: ready,
       onFrame: _frame,

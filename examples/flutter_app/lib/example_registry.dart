@@ -13,6 +13,7 @@ import 'package:flutter_scene_box3d/flutter_scene_box3d.dart'
 import 'package:example_app/example_animation.dart';
 import 'example_area_lights.dart';
 import 'example_vr.dart';
+import 'example_augmented_reality.dart';
 import 'example_reflection_probes.dart';
 
 import 'example_accessibility.dart';
@@ -251,6 +252,7 @@ Map<String, WidgetBuilder> galleryExamples() {
   final box3dReady = Box3dPhysicsWorld.ensureInitialized();
   return {
     'VR': (context) => const ExampleVr(),
+    'Augmented Reality': (context) => const ExampleAugmentedReality(),
     'Car': (context) => const ExampleCar(),
     'Animation': (context) => const ExampleAnimation(),
     'Flutter Logo': (context) => const ExampleLogo(),

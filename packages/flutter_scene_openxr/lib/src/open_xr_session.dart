@@ -55,6 +55,15 @@ class OpenXrSession {
     return result['scale']!.toDouble();
   }
 
+  /// Shows the real room behind transparent scene pixels while [enabled].
+  ///
+  /// Uses the runtime's alpha-blend (or additive) environment blend mode, so
+  /// the scene must render with a transparent background. A runtime that
+  /// offers neither keeps the scene opaque. The request applies on the next
+  /// XR frame and stays until changed.
+  Future<void> setPassthrough(bool enabled) =>
+      _channel.invokeMethod<void>('setPassthrough', enabled);
+
   Future<void> resetPanels() => _channel.invokeMethod<void>('resetPanels');
 
   Future<void> exitImmersive() => _channel.invokeMethod<void>('exitImmersive');

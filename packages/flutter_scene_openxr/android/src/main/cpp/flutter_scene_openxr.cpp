@@ -31,6 +31,8 @@ constexpr char kLogTag[] = "FlutterSceneOpenXR";
 std::atomic<uint64_t> gPerformanceGeneration{0};
 std::atomic<uint64_t> gPanelLayoutGeneration{0};
 std::atomic_bool gQuarantinedGpuSession{false};
+// Set from the UI thread; the render loop reads it once per frame.
+std::atomic_bool gPassthroughRequested{false};
 std::mutex gResolutionMutex;
 uint64_t gResolutionRequestId = 0;
 std::optional<std::pair<uint64_t, double>> gResolutionRequest;
@@ -1219,6 +1221,7 @@ public:
         if (!CheckXr(xrBeginFrame(session_, &beginInfo), "xrBeginFrame")) return false;
         const auto activeStarted = PerformanceClock::now();
 
+        passthroughActive_ = gPassthroughRequested.load() && passthroughBlendMode_.has_value();
         XrCompositionLayerProjection layer{XR_TYPE_COMPOSITION_LAYER_PROJECTION};
         XrCompositionLayerQuad compositionQuad{XR_TYPE_COMPOSITION_LAYER_QUAD};
         std::array<XrCompositionLayerQuad, 2> panelLayers{};
@@ -1269,7 +1272,8 @@ public:
 
         XrFrameEndInfo endInfo{XR_TYPE_FRAME_END_INFO};
         endInfo.displayTime = frameState.predictedDisplayTime;
-        endInfo.environmentBlendMode = blendMode_;
+        // Applied before RenderProjection so the layer flags agree with it.
+        endInfo.environmentBlendMode = passthroughActive_ ? *passthroughBlendMode_ : opaqueBlendMode_;
         endInfo.layerCount = layers.size();
         endInfo.layers = layers.empty() ? nullptr : layers.data();
         const bool ended = CheckXr(xrEndFrame(session_, &endInfo), "xrEndFrame");
@@ -1644,6 +1648,24 @@ private:
                 XR_ENVIRONMENT_BLEND_MODE_OPAQUE) != blendModes.end()) {
             blendMode_ = XR_ENVIRONMENT_BLEND_MODE_OPAQUE;
         }
+        opaqueBlendMode_ = blendMode_;
+        // Passthrough shows the real room behind the scene. Alpha blend honors
+        // per-pixel alpha; additive only adds light, so it is the fallback.
+        const auto offers = [&](XrEnvironmentBlendMode mode) {
+            return std::find(blendModes.begin(), blendModes.end(), mode) != blendModes.end();
+        };
+        if (offers(XR_ENVIRONMENT_BLEND_MODE_ALPHA_BLEND)) {
+            passthroughBlendMode_ = XR_ENVIRONMENT_BLEND_MODE_ALPHA_BLEND;
+        } else if (offers(XR_ENVIRONMENT_BLEND_MODE_ADDITIVE)) {
+            passthroughBlendMode_ = XR_ENVIRONMENT_BLEND_MODE_ADDITIVE;
+        }
+        for (const XrEnvironmentBlendMode mode : blendModes) {
+            LOGI("Runtime offers environment blend mode %d", static_cast<int>(mode));
+        }
+        LOGI("Passthrough blend mode: %s",
+             passthroughBlendMode_ ? (*passthroughBlendMode_ == XR_ENVIRONMENT_BLEND_MODE_ALPHA_BLEND
+                                          ? "alpha-blend" : "additive")
+                                   : "unavailable");
         return true;
     }
 
@@ -2302,7 +2324,10 @@ private:
             directRenderMicros);
 
         layer.space = appSpace_;
-        layer.layerFlags = 0;
+        // Without this flag the runtime ignores the eye alpha and covers the room.
+        layer.layerFlags = passthroughActive_
+            ? XR_COMPOSITION_LAYER_BLEND_TEXTURE_SOURCE_ALPHA_BIT
+            : 0;
         layer.viewCount = projectionViews.size();
         layer.views = projectionViews.data();
         return ProjectionResult::rendered;
@@ -2482,6 +2507,9 @@ private:
     XrSessionState sessionState_ = XR_SESSION_STATE_UNKNOWN;
     XrViewConfigurationType viewType_ = XR_VIEW_CONFIGURATION_TYPE_PRIMARY_STEREO;
     XrEnvironmentBlendMode blendMode_ = XR_ENVIRONMENT_BLEND_MODE_OPAQUE;
+    XrEnvironmentBlendMode opaqueBlendMode_ = XR_ENVIRONMENT_BLEND_MODE_OPAQUE;
+    std::optional<XrEnvironmentBlendMode> passthroughBlendMode_;
+    bool passthroughActive_ = false;
     std::vector<XrViewConfigurationView> configurationViews_;
     std::vector<XrView> views_;
     std::vector<Swapchain> swapchains_;
@@ -2628,4 +2656,10 @@ Java_dev_bdero_flutter_1scene_1openxr_FlutterSceneOpenXrActivity_nativeRequestRe
     const auto request = ++gResolutionRequestId;
     gResolutionRequest = std::make_pair(request, scale);
     return static_cast<jlong>(request);
+}
+
+extern "C" JNIEXPORT void JNICALL
+Java_dev_bdero_flutter_1scene_1openxr_FlutterSceneOpenXrActivity_nativeSetPassthrough(
+    JNIEnv*, jobject, jboolean enabled) {
+    gPassthroughRequested.store(enabled == JNI_TRUE);
 }

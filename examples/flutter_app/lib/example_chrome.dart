@@ -6,6 +6,11 @@ import 'package:flutter/foundation.dart';
 // Keep it separate from the floating panels' light or dark UI theme.
 const galleryBackgroundColor = Color(0xfffdf7ff);
 
+// Examples that render over the real room in a headset (passthrough). The
+// gallery asks the OpenXR host for an alpha-blended environment and leaves the
+// eye background transparent for these; every other example stays opaque.
+const galleryPassthroughExamples = <String>{'Augmented Reality'};
+
 // Shared instructions for the demo's Controls card and the gallery Help tab.
 const galleryVrControlsHelp =
     'Aim + trigger: select.\n'
