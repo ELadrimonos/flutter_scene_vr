@@ -30,6 +30,7 @@ swapchains, and headset presentation. Flutter still supplies the widget panels.
 | --- | --- |
 | **Chrome / web** | Flutter Scene's WebGL2 backend inside the ordinary Flutter gallery. No headset or native engine compilation is needed for this mode. |
 | **Meta Quest VR** | Flutter Scene → Flutter GPU/Impeller GLES → borrowed OpenXR eye images → native stereo presentation. Widgets use separate floating UI surfaces. Requires the custom compiled Flutter engine. |
+| **Steam Frame VR / AR** | The same native path inside the Frame's Lepton Android container, under SteamVR's OpenXR runtime. The **Augmented Reality** example renders over passthrough. |
 
 The native Quest world is not a web page or a flat screenshot placed in front
 of the user. Conversely, opening Chrome does not start a native OpenXR session
@@ -174,6 +175,17 @@ wireless session disappears after a restart. See
 [Meta's ADB guide](https://developers.meta.com/horizon/documentation/unity/ts-adb/)
 and [MQDH device management](https://developers.meta.com/horizon/documentation/unity/ts-mqdh-basic-usage/).
 
+### Steam Frame instead of Quest
+
+The Steam Frame runs the same APK inside its Lepton Android container. Start
+**Lepton Development** on the headset, connect adb to the container over the
+network (`adb connect <headset-ip>:5555`), and in step 4 run
+`./examples/openxr_quest/tool/frame-build-and-deploy.sh` instead of the Quest
+helper, with `FRAME_ADB_TARGET=<headset-ip>:5555` and the same engine variables.
+The
+[gallery README](https://github.com/adrian-moisa/flutter_scene_vr/blob/vr/examples/openxr_quest/README.md#steam-frame)
+covers USB and the Frame Controller's different button layout.
+
 ## 4. Build, install, and enter native VR
 
 First finish **both** engine builds in the Flutter fork guide. The native host
@@ -223,6 +235,7 @@ Android processes.
 | Aim + hold grip | Move a floating panel; use the same hand's stick to push it away or pull it closer, then release to leave it there. |
 | **Recenter** / panel-reset icon | Reset the camera / restore the floating-panel layout. |
 | Small native **FPS / UI ON** button | Hide/suspend Flutter widget panels; trigger again to restore them. Scene rendering and statistics continue. |
+| **Augmented Reality** example | Dash over the real room via passthrough. Grip grabs him, both grips scale him, release drops or throws him, and the primary button freezes him; see the [gallery README](https://github.com/adrian-moisa/flutter_scene_vr/blob/vr/examples/openxr_quest/README.md#augmented-reality). |
 
 Not every gallery example or interaction has a native VR mapping. The current
 registry keeps Multiplayer, DICOM Volume, External Texture, and Split Screen
