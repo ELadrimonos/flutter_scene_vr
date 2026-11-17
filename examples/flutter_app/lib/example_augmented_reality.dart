@@ -1,3 +1,5 @@
+import 'dart:math' as math;
+
 import 'package:flutter/material.dart';
 import 'package:flutter_scene/scene.dart' hide Material;
 import 'package:vector_math/vector_math.dart' as vm;
@@ -27,8 +29,8 @@ import 'lighting_panel.dart' show LabeledSlider;
 ///
 /// In a headset the gallery lets controller grips grab Dash (see
 /// [galleryGrabbable]); released, he falls and bounces on the floor, keeping
-/// the throw's velocity. The primary button freezes him in place. The
-/// sliders put him back on the floor.
+/// the throw's velocity. The primary button freezes him in place. The size
+/// and distance sliders follow him wherever the hands put him.
 class ExampleAugmentedReality extends StatefulWidget {
   const ExampleAugmentedReality({super.key});
 
@@ -43,10 +45,27 @@ class _ExampleAugmentedRealityState extends State<ExampleAugmentedReality> {
   final Scene _scene = Scene();
 
   String _clip = 'Idle';
-  // Metres below the head at which Dash's feet are placed.
-  double _floorDrop = 1.5;
-  double _distance = 1.6;
-  double _size = 0.25;
+  static const _startFloorDrop = 1.5;
+  static const _startDistance = 1.6;
+  static const _startSize = 0.25;
+
+  // Metres below the head at which the floor is.
+  double _floorDrop = _startFloorDrop;
+
+  // Where Dash starts. These SceneModel props never change afterwards, so the
+  // widget never re-places him: the sliders, the hands and gravity all move
+  // the node itself, and the sliders read back where he really is.
+  static final _startPosition = vm.Vector3(
+    0,
+    -_startFloorDrop,
+    -_startDistance,
+  );
+  static final _startScale = vm.Vector3.all(_startSize);
+  // Horizontal distance from the viewer's starting position, and scale.
+  final _distance = ValueNotifier<double>(_startDistance);
+  final _size = ValueNotifier<double>(_startSize);
+  static const _distanceRange = (min: 0.3, max: 6.0);
+  static const _sizeRange = (min: 0.05, max: 2.0);
 
   // An invisible floor at the real floor's height that draws only Dash's
   // shadow, so the shadow lands on the real floor seen through passthrough.
@@ -82,6 +101,44 @@ class _ExampleAugmentedRealityState extends State<ExampleAugmentedReality> {
     if (floor.parent == null) _scene.add(floor);
     floor.localTransform = vm.Matrix4.translationValues(0, -_floorDrop, 0);
     _fall(deltaSeconds);
+    _readBackControls();
+  }
+
+  // Mirrors Dash's real size and distance into the sliders. Small changes
+  // are skipped so a resting or slowly drifting Dash does not repaint the
+  // panel every frame.
+  void _readBackControls() {
+    final node = _dash.node;
+    if (node == null) return;
+    final size = node.scale.x;
+    final position = node.position;
+    final distance = math.sqrt(
+      position.x * position.x + position.z * position.z,
+    );
+    if ((size - _size.value).abs() > 0.005) _size.value = size;
+    if ((distance - _distance.value).abs() > 0.01) _distance.value = distance;
+  }
+
+  // Moves Dash to [distance] along his current horizontal bearing, keeping
+  // his height, and stops him there.
+  void _setDistance(double distance) {
+    final node = _dash.node;
+    if (node == null) return;
+    final position = node.position;
+    final bearing = vm.Vector2(position.x, position.z);
+    if (bearing.length2 < 1e-6) bearing.setValues(0, -1);
+    bearing
+      ..normalize()
+      ..scale(distance);
+    node.position = vm.Vector3(bearing.x, position.y, bearing.y);
+    _velocity.setZero();
+    _distance.value = distance;
+  }
+
+  // Scales Dash about his feet (the model's origin).
+  void _setSize(double size) {
+    _dash.node?.scale = vm.Vector3.all(size);
+    _size.value = size;
   }
 
   void _fall(double deltaSeconds) {
@@ -119,12 +176,6 @@ class _ExampleAugmentedRealityState extends State<ExampleAugmentedReality> {
     node.position = position;
   }
 
-  // The sliders re-place Dash through the SceneModel props; start him at rest.
-  void _settle() {
-    _velocity.setZero();
-    galleryGrabbable.frozen = false;
-  }
-
   @override
   void initState() {
     super.initState();
@@ -133,6 +184,8 @@ class _ExampleAugmentedRealityState extends State<ExampleAugmentedReality> {
 
   @override
   void dispose() {
+    _distance.dispose();
+    _size.dispose();
     _scene.removeAll();
     super.dispose();
   }
@@ -164,12 +217,11 @@ class _ExampleAugmentedRealityState extends State<ExampleAugmentedReality> {
             children: [
               SceneModel(
                 'assets_src/dash.glb',
-                // Headset grips grab and pinch-scale Dash; the sliders below
-                // put him back where they say.
+                // Headset grips grab and pinch-scale Dash.
                 name: galleryGrabbableNodeName,
                 controller: _dash,
-                position: vm.Vector3(0, -_floorDrop, -_distance),
-                scale: vm.Vector3.all(_size),
+                position: _startPosition,
+                scale: _startScale,
                 animations: [
                   for (final clip in _clips)
                     SceneAnimationSpec(clip, weight: clip == _clip ? 1 : 0),
@@ -217,35 +269,34 @@ class _ExampleAugmentedRealityState extends State<ExampleAugmentedReality> {
           value: _floorDrop,
           min: 0.5,
           max: 2.2,
-          onChanged: (v) => setState(() {
-            _floorDrop = v;
-            _settle();
-          }),
+          // Gravity takes Dash to the new floor height.
+          onChanged: (v) => setState(() => _floorDrop = v),
         ),
-        LabeledSlider(
-          label: 'Distance (m)',
-          value: _distance,
-          min: 0.6,
-          max: 4,
-          onChanged: (v) => setState(() {
-            _distance = v;
-            _settle();
-          }),
-        ),
-        LabeledSlider(
-          label: 'Size',
-          value: _size,
-          min: 0.08,
-          max: 0.6,
-          onChanged: (v) => setState(() {
-            _size = v;
-            _settle();
-          }),
-        ),
+        _liveSlider('Distance (m)', _distance, _distanceRange, _setDistance),
+        _liveSlider('Size', _size, _sizeRange, _setSize),
       ],
     ),
   );
 }
+
+// A slider that follows [value] as the scene changes it. The thumb stays in
+// range while the label shows the real value.
+Widget _liveSlider(
+  String label,
+  ValueNotifier<double> value,
+  ({double min, double max}) range,
+  ValueChanged<double> onChanged,
+) => ValueListenableBuilder<double>(
+  valueListenable: value,
+  builder: (context, current, _) => LabeledSlider(
+    label: label,
+    value: current.clamp(range.min, range.max),
+    valueText: current.toStringAsFixed(2),
+    min: range.min,
+    max: range.max,
+    onChanged: onChanged,
+  ),
+);
 
 /// A flat wall-and-floor gradient so the transparent scene has something
 /// behind it when there is no passthrough camera.
